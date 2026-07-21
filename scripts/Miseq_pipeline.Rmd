@@ -1,0 +1,5600 @@
+---
+title: "adventice_bacteria"
+output: html_document
+date: "2026-07-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+c("phyloseq", "vegan", "DESeq2", "ggplot2", "dplyr", "tidyr", "readr", "ggpubr", "reshape2", "patchwork", "microbiome", "stringr", "gridExtra")
+
+# List of packages used in the project
+packages <- c(
+  "phyloseq", "vegan", "DESeq2", "ggplot2", "dplyr", "tidyr", "readr",
+  "ggpubr", "reshape2", "patchwork", "microbiome", "stringr", "gridExtra"
+)
+
+# Install missing packages
+install_if_missing <- function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+invisible(lapply(packages, install_if_missing))
+
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install(c("DESeq2", "phyloseq", "microbiome"))
+```
+
+
+
+# LOADING PROCESSED MICROBIOME DATA
+
+```{r}
+# ================================================================================
+# LOADING PROCESSED MICROBIOME DATA - R
+# ================================================================================
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(tibble)
+})
+
+cat("================================================================================\n")
+cat("LOADING PROCESSED MICROBIOME DATA - R\n")
+cat("================================================================================\n")
+
+# Configuration - Update this path to match your data location
+mypath <- ""
+df_dir <- file.path(mypath, "df")
+
+cat("Loading data from:", df_dir, "\n")
+
+# File paths
+# metadata_file <- file.path(df_dir, "metadata_bacteria_1282ASVs.csv")
+# otu_count_file <- file.path(df_dir, "otu_bacteria_table_R_1282ASVs.csv")
+# otu_normalized_file <- file.path(df_dir, "otu_bacteria_normalized_v4.csv")
+# taxonomy_file <- file.path(df_dir, "tax_bacteria_R_1282ASVs.csv")
+
+metadata_file <- file.path(df_dir, "metadata_bacteria_1314ASVs.csv")
+otu_count_file <- file.path(df_dir, "otu_bacteria_table_R_1314ASVs.csv")
+otu_normalized_file <- file.path(df_dir, "otu_bacteria_normalized_v4.csv")
+taxonomy_file <- file.path(df_dir, "tax_bacteria_R_1314ASVs.csv")
+
+
+# Check if files exist
+files_to_check <- list(
+  metadata = metadata_file,
+  otu_count = otu_count_file,
+  otu_normalized = otu_normalized_file,
+  taxonomy = taxonomy_file
+)
+
+cat("\n1. Checking file availability...\n")
+missing_files <- c()
+for (name in names(files_to_check)) {
+  filepath <- files_to_check[[name]]
+  if (file.exists(filepath)) {
+    cat("✓", name, ":", basename(filepath), "\n")
+  } else {
+    cat("✗", name, ":", basename(filepath), "- FILE NOT FOUND\n")
+    missing_files <- c(missing_files, name)
+  }
+}
+
+if (length(missing_files) > 0) {
+  cat("\n Missing files:", paste(missing_files, collapse = ", "), "\n")
+  cat("Please ensure all files are generated from the previous processing step.\n")
+  stop("Required files are missing.")
+}
+
+# ================================================================================
+# 2. LOAD METADATA
+# ================================================================================
+cat("\n2. Loading metadata...\n")
+
+tryCatch({
+  metadata_all <- read_csv(metadata_file, show_col_types = FALSE)
+  cat("✓ Metadata loaded:", nrow(metadata_all), "rows x", ncol(metadata_all), "columns\n")
+  cat("  Columns:", paste(colnames(metadata_all), collapse = ", "), "\n")
+  
+  if ("Sample_Type" %in% colnames(metadata_all)) {
+    sample_types <- table(metadata_all$Sample_Type)
+    cat("  Sample types:", paste(names(sample_types), "=", sample_types, collapse = ", "), "\n")
+  }
+}, error = function(e) {
+  cat("Error loading metadata:", e$message, "\n")
+  stop("Failed to load metadata")
+})
+
+# ================================================================================
+# 3. LOAD OTU COUNT MATRIX
+# ================================================================================
+cat("\n3. Loading OTU count matrix...\n")
+
+tryCatch({
+  otumat <- read_delim(otu_count_file, delim = "\t", show_col_types = FALSE)
+  
+  # Set first column as row names if it contains ASV IDs
+  if (ncol(otumat) > 1 && is.character(otumat[[1]])) {
+    rownames(otumat) <- otumat[[1]]
+    otumat <- otumat[, -1]
+  }
+  
+  # Convert to matrix for easier manipulation
+  otumat <- as.matrix(otumat)
+  
+  cat("OTU count matrix loaded:", nrow(otumat), "ASVs x", ncol(otumat), "samples\n")
+  cat("  ASV range:", rownames(otumat)[1], "to", rownames(otumat)[nrow(otumat)], "\n")
+  cat("  Sample range:", colnames(otumat)[1], "to", colnames(otumat)[ncol(otumat)], "\n")
+  cat("  Read count range:", min(otumat), "to", max(otumat), "\n")
+  cat("  Total reads:", format(sum(otumat), big.mark = ","), "\n")
+}, error = function(e) {
+  cat("Error loading OTU count matrix:", e$message, "\n")
+  stop("Failed to load OTU count matrix")
+})
+
+# ================================================================================
+# 4. LOAD OTU NORMALIZED MATRIX
+# ================================================================================
+cat("\n4. Loading OTU normalized matrix...\n")
+
+tryCatch({
+  otumat_normalized <- read_delim(otu_normalized_file, delim = "\t", show_col_types = FALSE)
+  
+  # Set first column as row names if it contains ASV IDs
+  if (ncol(otumat_normalized) > 1 && is.character(otumat_normalized[[1]])) {
+    rownames(otumat_normalized) <- otumat_normalized[[1]]
+    otumat_normalized <- otumat_normalized[, -1]
+  }
+  
+  # Convert to matrix
+  otumat_normalized <- as.matrix(otumat_normalized)
+  
+  cat("OTU normalized matrix loaded:", nrow(otumat_normalized), "ASVs x", ncol(otumat_normalized), "samples\n")
+  cat("  Value range:", sprintf("%.6f", min(otumat_normalized)), "to", sprintf("%.6f", max(otumat_normalized)), "\n")
+  
+  # Check normalization (should sum to 1 per sample)
+  sample_sums <- colSums(otumat_normalized)
+  cat("  Sample sums range:", sprintf("%.6f", min(sample_sums)), "to", sprintf("%.6f", max(sample_sums)), "\n")
+  
+  if (all(abs(sample_sums - 1.0) < 0.001)) {
+    cat("  Normalization verified: all samples sum to 1.0\n")
+  } else {
+    cat("  Normalization warning: samples don't sum to exactly 1.0\n")
+  }
+}, error = function(e) {
+  cat("Error loading OTU normalized matrix:", e$message, "\n")
+  stop("Failed to load OTU normalized matrix")
+})
+
+# ================================================================================
+# 5. LOAD TAXONOMY MATRIX
+# ================================================================================
+cat("\n5. Loading taxonomy matrix...\n")
+
+tryCatch({
+  taxmat <- read_delim(taxonomy_file, delim = "\t", show_col_types = FALSE)
+  
+  cat("Taxonomy matrix loaded:", nrow(taxmat), "rows x", ncol(taxmat), "columns\n")
+  cat("  Taxonomic columns:", paste(colnames(taxmat), collapse = ", "), "\n")
+  
+  if ("Kingdom" %in% colnames(taxmat)) {
+    kingdom_counts <- table(taxmat$Kingdom)
+    cat("  Kingdom distribution:", paste(names(kingdom_counts), "=", kingdom_counts, collapse = ", "), "\n")
+  }
+  
+  if ("Phylum" %in% colnames(taxmat)) {
+    n_phyla <- length(unique(taxmat$Phylum))
+    cat("  Number of phyla:", n_phyla, "\n")
+    
+    top_phyla <- head(sort(table(taxmat$Phylum), decreasing = TRUE), 5)
+    cat("  Top 5 phyla:", paste(names(top_phyla), "=", top_phyla, collapse = ", "), "\n")
+  }
+}, error = function(e) {
+  cat("Error loading taxonomy matrix:", e$message, "\n")
+  stop("Failed to load taxonomy matrix")
+})
+
+# ================================================================================
+# 6. DATA SYNCHRONIZATION CHECKS
+# ================================================================================
+cat("\n6. Performing data synchronization checks...\n")
+
+# Check ASV synchronization
+otu_asvs <- rownames(otumat)
+norm_asvs <- rownames(otumat_normalized)
+tax_asvs <- if ("Cluster" %in% colnames(taxmat)) taxmat$Cluster else c()
+
+cat("ASVs in count matrix:", length(otu_asvs), "\n")
+cat("ASVs in normalized matrix:", length(norm_asvs), "\n")
+cat("ASVs in taxonomy matrix:", length(tax_asvs), "\n")
+
+if (identical(otu_asvs, norm_asvs)) {
+  cat("✓ Count and normalized matrices have identical ASVs\n")
+} else {
+  cat("⚠️  Count and normalized matrices have different ASVs\n")
+}
+
+if (length(tax_asvs) > 0 && all(otu_asvs %in% tax_asvs)) {
+  cat("All OTU ASVs have taxonomy information\n")
+} else if (length(tax_asvs) > 0) {
+  missing_tax <- sum(!otu_asvs %in% tax_asvs)
+  cat("- ", missing_tax, "ASVs missing taxonomy information\n")
+}
+
+# Check sample synchronization
+otu_samples <- colnames(otumat)
+norm_samples <- colnames(otumat_normalized)
+meta_samples <- if ("sample" %in% colnames(metadata_all)) metadata_all$sample else c()
+
+cat("Samples in count matrix:", length(otu_samples), "\n")
+cat("Samples in normalized matrix:", length(norm_samples), "\n")
+cat("Samples in metadata:", length(meta_samples), "\n")
+
+if (identical(otu_samples, norm_samples)) {
+  cat("✓ Count and normalized matrices have identical samples\n")
+} else {
+  cat("⚠️  Count and normalized matrices have different samples\n")
+}
+
+if (length(meta_samples) > 0 && all(otu_samples %in% meta_samples)) {
+  cat("All OTU samples have metadata information\n")
+} else if (length(meta_samples) > 0) {
+  missing_meta <- sum(!otu_samples %in% meta_samples)
+  cat("- ", missing_meta, "samples missing metadata information\n")
+}
+
+# ================================================================================
+# 7. CREATE USEFUL DERIVED OBJECTS
+# ================================================================================
+cat("\n7. Creating derived objects for analysis...\n")
+
+# Create taxonomy lookup vectors
+if ("Cluster" %in% colnames(taxmat)) {
+  cluster_2_phylum <- if ("Phylum" %in% colnames(taxmat)) setNames(taxmat$Phylum, taxmat$Cluster) else c()
+  cluster_2_class <- if ("Class" %in% colnames(taxmat)) setNames(taxmat$Class, taxmat$Cluster) else c()
+  cluster_2_family <- if ("Family" %in% colnames(taxmat)) setNames(taxmat$Family, taxmat$Cluster) else c()
+  cluster_2_order <- if ("Order" %in% colnames(taxmat)) setNames(taxmat$Order, taxmat$Cluster) else c()
+  cluster_2_genus <- if ("Genus" %in% colnames(taxmat)) setNames(taxmat$Genus, taxmat$Cluster) else c()
+  
+  cat("Created taxonomy lookup vectors:\n")
+  cat("  • Phylum:", length(cluster_2_phylum), "entries\n")
+  cat("  • Class:", length(cluster_2_class), "entries\n")
+  cat("  • Order:", length(cluster_2_order), "entries\n")
+  cat("  • Family:", length(cluster_2_family), "entries\n")
+  cat("  • Genus:", length(cluster_2_genus), "entries\n")
+}
+
+# Create pot to plant mapping if possible
+if (all(c("pot", "species") %in% colnames(metadata_all))) {
+  pot_2_plant <- setNames(metadata_all$species, metadata_all$pot)
+  pot_2_plant <- pot_2_plant[!duplicated(names(pot_2_plant))]  # Remove duplicates
+  cat("Created pot-to-plant mapping:", length(pot_2_plant), "entries\n")
+} else {
+  pot_2_plant <- c()
+  cat("⚠️  Could not create pot-to-plant mapping (missing columns)\n")
+}
+
+# Create sample type mapping
+if (all(c("sample", "Sample_Type") %in% colnames(metadata_all))) {
+  sample_info <- setNames(metadata_all$Sample_Type, metadata_all$sample)
+  cat("Created sample type mapping:", length(sample_info), "entries\n")
+} else {
+  sample_info <- c()
+  cat("Could not create sample type mapping (missing columns)\n")
+}
+
+# Create summary statistics
+n_asvs <- nrow(otumat)
+n_samples <- ncol(otumat)
+total_reads <- sum(otumat)
+mean_reads_per_sample <- mean(colSums(otumat))
+mean_asvs_per_sample <- mean(colSums(otumat > 0))
+
+cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+cat("DATA LOADING COMPLETE!\n")
+cat(paste(rep("=", 80), collapse = ""), "\n")
+cat("LOADED VARIABLES:\n")
+cat("  • metadata_all:", nrow(metadata_all), "x", ncol(metadata_all), "- Sample metadata\n")
+cat("  • otumat:", nrow(otumat), "x", ncol(otumat), "- ASV count matrix\n")
+cat("  • otumat_normalized:", nrow(otumat_normalized), "x", ncol(otumat_normalized), "- Normalized abundances\n")
+cat("  • taxmat:", nrow(taxmat), "x", ncol(taxmat), "- Taxonomy information\n")
+cat("\n HELPER OBJECTS:\n")
+cat("  • cluster_2_phylum: Phylum lookup vector\n")
+cat("  • cluster_2_class: Class lookup vector\n")
+cat("  • cluster_2_family: Family lookup vector\n")
+cat("  • cluster_2_order: Order lookup vector\n")
+cat("  • cluster_2_genus: Genus lookup vector\n")
+cat("  • pot_2_plant: Pot to plant species mapping\n")
+cat("  • sample_info: Sample type mapping\n")
+cat("\n SUMMARY STATISTICS:\n")
+cat("  • Total ASVs:", format(n_asvs, big.mark = ","), "\n")
+cat("  • Total samples:", format(n_samples, big.mark = ","), "\n")
+cat("  • Total reads:", format(total_reads, big.mark = ","), "\n")
+cat("  • Mean reads per sample:", format(round(mean_reads_per_sample), big.mark = ","), "\n")
+cat("  • Mean ASVs per sample:", format(round(mean_asvs_per_sample), big.mark = ","), "\n")
+cat("\n Ready for downstream analysis!\n")
+cat(paste(rep("=", 80), collapse = ""), "\n")
+```
+
+### bacteria/ITS run
+
+setwd("~/Desktop/Work/DeepImpact/Weeds_wheat/submission/ENA/github")
+
+load("~/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/weeds_bac_fungi.RData")
+
+save.image("~/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/weeds_bac_fungi.RData")
+
+
+
+
+```{r}
+library(phyloseq)
+library(dplyr)
+library(readr)
+
+# ---- config ----
+df_dir  <- file.path("~/Desktop/Work/DeepImpact/Weeds_wheat/submission/ENA/github/data/")
+
+# small helper: same “first token before _” cleaner you used (if needed later)
+first_token <- function(x) sapply(strsplit(x, "_"), `[`, 1)
+
+# general builder with diagnostics
+build_physeq <- function(otu_df, tax_df, meta_df, 
+                         ranks, control_col_patterns = character(),
+                         sample_id_transform = identity,
+                         dataset_name = "dataset") {
+
+  message("---- ", dataset_name, " ----")
+
+  # 1) drop control samples by column name pattern
+  if (length(control_col_patterns)) {
+    for (pat in control_col_patterns) {
+      drop_n <- sum(grepl(pat, colnames(otu_df)))
+      if (drop_n > 0) message("Dropping ", drop_n, " columns matching '", pat, "'")
+      otu_df <- dplyr::select(otu_df, -tidyselect::matches(pat))
+    }
+  }
+
+  # 2) drop zero‑abundance taxa
+  keep_taxa <- rowSums(otu_df) > 0
+  if (!all(keep_taxa)) {
+    message("Dropping ", sum(!keep_taxa), " zero‑abundance taxa.")
+    otu_df <- otu_df[keep_taxa, , drop = FALSE]
+  }
+
+  # 3) sample ID cleaning (optional)
+  colnames(otu_df) <- sample_id_transform(colnames(otu_df))
+  rownames(meta_df) <- sample_id_transform(rownames(meta_df))
+
+  # 4) align samples
+  shared_samples <- intersect(colnames(otu_df), rownames(meta_df))
+  message("Samples: OTU=", ncol(otu_df), " | META=", nrow(meta_df), " | shared=", length(shared_samples))
+  if (length(shared_samples) == 0) stop("No shared sample IDs between OTU and metadata.")
+  # subset & reorder
+  otu_df  <- otu_df[, shared_samples, drop = FALSE]
+  meta_df <- meta_df[shared_samples, , drop = FALSE]
+
+  # 5) align taxonomy to OTU taxa
+  # if taxonomy has a 'Cluster' column, use it as rownames then drop it
+  if ("Cluster" %in% colnames(tax_df)) {
+    rownames(tax_df) <- tax_df$Cluster
+    tax_df$Cluster <- NULL
+  }
+  # coerce rank columns
+  missing_ranks <- setdiff(ranks, colnames(tax_df))
+  if (length(missing_ranks)) {
+    tax_df[, missing_ranks] <- NA
+  }
+  tax_df <- tax_df[, ranks, drop = FALSE]
+
+  shared_taxa <- intersect(rownames(otu_df), rownames(tax_df))
+  message("Taxa: OTU=", nrow(otu_df), " | TAX=", nrow(tax_df), " | shared=", length(shared_taxa))
+  if (length(shared_taxa) == 0) stop("No shared taxa IDs between OTU and taxonomy.")
+  # subset & reorder
+  otu_df <- otu_df[shared_taxa, , drop = FALSE]
+  tax_df <- tax_df[shared_taxa, , drop = FALSE]
+
+  # 6) build phyloseq
+  OTU <- otu_table(as.matrix(otu_df), taxa_are_rows = TRUE)
+  TAX <- tax_table(as.matrix(tax_df))
+  META <- sample_data(meta_df)
+
+  ps <- phyloseq(OTU, TAX, META)
+
+  # 7) final prints
+  message("phyloseq: taxa=", ntaxa(ps), " | samples=", nsamples(ps))
+  # quick mismatch checkers if you ever need them:
+  # setdiff(colnames(otu_df), rownames(meta_df))
+  # setdiff(rownames(tax_df), rownames(otu_df))
+
+  ps
+}
+
+# =========================
+# BACTERIA
+# =========================
+
+# load
+# meta_bac <- read.table(file.path(df_dir, "metadata_bacteria_1282ASVs.csv"),
+#                        sep = ",", header = TRUE, row.names = 1, check.names = FALSE)
+# otu_bac  <- read.table(file.path(df_dir, "otu_bacteria_table_R_1282ASVs.csv"),
+#                        header = TRUE, row.names = 1, check.names = FALSE)
+# tax_bac  <- read.table(file.path(df_dir, "tax_bacteria_R_1282ASVs.csv"),
+#                        header = TRUE, row.names = 1, sep = "\t", check.names = FALSE)
+
+meta_bac <- read_csv(metadata_file, show_col_types = FALSE)
+meta_bac <- read.table(file.path(df_dir, "metadata_bacteria_1314ASVs.csv"),
+                       sep = ",", header = TRUE, row.names = 1, check.names = FALSE)
+otu_bac  <- read.table(file.path(df_dir, "otu_bacteria_table_R_1314ASVs.csv"),
+                       header = TRUE, row.names = 1, check.names = FALSE)
+tax_bac  <- read.table(file.path(df_dir, "tax_bacteria_R_1314ASVs.csv"),
+                       header = TRUE, row.names = 1, sep = "\t", check.names = FALSE)
+# (you were stripping at "_"; keep as-is if already correct)
+# colnames(otu_bac) <- first_token(colnames(otu_bac))
+
+# replace "." with "-" consistently in both
+rownames(meta_bac) <- gsub("\\.", "-", rownames(meta_bac))
+colnames(otu_bac)  <- gsub("\\.", "-", colnames(otu_bac))
+
+# build
+physeq_bacteria <- build_physeq(
+  otu_df  = otu_bac,
+  tax_df  = tax_bac,
+  meta_df = meta_bac,
+  ranks   = c("Kingdom","Phylum","Class","Order","Family","Genus","Species"),
+  control_col_patterns = c("Undetermined"),     # drop these columns in OTU
+  sample_id_transform  = identity,              # already cleaned above
+  dataset_name         = "Bacteria"
+)
+
+# =========================
+# FUNGI
+# =========================
+
+# meta_fun <- read.table(file.path(df_dir, "metadata_fungi_507_ASVs.csv"),
+#                        sep = ",", header = TRUE, row.names = 1, check.names = FALSE)
+# otu_fun  <- read.table(file.path(df_dir, "otu_fungi_table_R_507_ASVs.csv"),
+#                        header = TRUE, row.names = 1, check.names = FALSE)
+# tax_fun  <- read.table(file.path(df_dir, "tax_fungi_R_507_ASVs.csv"),
+#                        header = TRUE, row.names = 1, check.names = FALSE)
+meta_fun <- read.table(file.path(df_dir, "metadata_fungi_647ASVs.csv"),
+                       sep = ",", header = TRUE, row.names = 1, check.names = FALSE)
+otu_fun  <- read.table(file.path(df_dir, "otu_fungi_table_R_647ASVs.csv"),
+                       header = TRUE, row.names = 1, check.names = FALSE)
+tax_fun  <- read.table(file.path(df_dir, "tax_fungi_R_647ASVs.csv"),
+                       header = TRUE, row.names = 1, check.names = FALSE)
+# drop your control samples by patterns
+# (you used "T2","T3","Undetermined"; adjust as needed)
+physeq_fungi <- build_physeq(
+  otu_df  = otu_fun,
+  tax_df  = tax_fun,
+  meta_df = meta_fun,
+  ranks   = c("Domain","Phylum","Class","Order","Family","Genus","Species"), # fungi taxonomy had "Domain"
+  control_col_patterns = c("T2","T3","Undetermined"),
+  sample_id_transform  = function(x) gsub("\\.", "-", x),  # mimic your gsub on both sides
+  dataset_name         = "Fungi"
+)
+
+# Summaries
+physeq_bacteria
+physeq_fungi
+```
+
+
+# 3.1 Drivers of wheat root microbiome composition across soil types
+
+## 3.1.1. Community composition and assembly
+
+### Sequential ANOVA
+
+SEQUENTIAL PERMANOVA - BACTERIA/FUNGI
+
+
+```{r}
+# ============================================================================
+# SEQUENTIAL PERMANOVA - BACTERIA
+# ============================================================================
+bacteria_seq <- adonis2(
+  bacteria_bray ~ soil + species + soil:species,
+  data = metadata_bacteria,
+  permutations = 999,
+  by = "terms"  # Sequential - order matters!
+)
+
+# Extract sequential R²
+bacteria_seq_df <- as.data.frame(bacteria_seq)
+bacteria_seq_df$R2_percent <- bacteria_seq_df$R2 * 100
+bacteria_seq_df$Cumulative_R2 <- cumsum(bacteria_seq_df$R2_percent)
+
+print(bacteria_seq_df[1:3, c("R2", "R2_percent", "Cumulative_R2", "Pr(>F)")])
+
+# Calculate true residual
+total_explained_bacteria <- sum(bacteria_seq_df$R2[1:3], na.rm = TRUE)
+residual_bacteria <- 1 - total_explained_bacteria
+
+cat(sprintf("\nTotal explained variance: %.1f%%\n", total_explained_bacteria * 100))
+cat(sprintf("Residual (unexplained): %.1f%%\n", residual_bacteria * 100))
+
+# ============================================================================
+# SEQUENTIAL PERMANOVA - FUNGI  
+# ============================================================================
+fungi_seq <- adonis2(
+  fungi_bray ~ soil + species + soil:species,
+  data = metadata_fungi,
+  permutations = 999,
+  by = "terms"
+)
+
+fungi_seq_df <- as.data.frame(fungi_seq)
+fungi_seq_df$R2_percent <- fungi_seq_df$R2 * 100
+fungi_seq_df$Cumulative_R2 <- cumsum(fungi_seq_df$R2_percent)
+
+print(fungi_seq_df[1:3, c("R2", "R2_percent", "Cumulative_R2", "Pr(>F)")])
+
+total_explained_fungi <- sum(fungi_seq_df$R2[1:3], na.rm = TRUE)
+residual_fungi <- 1 - total_explained_fungi
+
+cat(sprintf("\nTotal explained variance: %.1f%%\n", total_explained_fungi * 100))
+cat(sprintf("Residual (unexplained): %.1f%%\n", residual_fungi * 100))
+```
+
+
+
+```{r}
+# ============================================================================
+# SHOW FULL SEQUENTIAL PARTITIONING - BACTERIA
+# ============================================================================
+cat("\n=== BACTERIA - Sequential PERMANOVA ===\n")
+print(bacteria_seq)
+
+cat("\n=== Individual Term Contributions (Bacteria) ===\n")
+print(bacteria_seq_df[1:3, c("Df", "SumOfSqs", "R2", "R2_percent", "F", "Pr(>F)")])
+
+# ============================================================================
+# SHOW FULL SEQUENTIAL PARTITIONING - FUNGI
+# ============================================================================
+cat("\n=== FUNGI - Sequential PERMANOVA ===\n")
+print(fungi_seq)
+
+cat("\n=== Individual Term Contributions (Fungi) ===\n")
+print(fungi_seq_df[1:3, c("Df", "SumOfSqs", "R2", "R2_percent", "F", "Pr(>F)")])
+
+# ============================================================================
+# NOW COMPARE TO MARGINAL (Type III) - BACTERIA
+# ============================================================================
+cat("\n=== BACTERIA - Marginal Effects (Type III) ===\n")
+bacteria_marginal <- adonis2(
+  bacteria_bray ~ soil * species,
+  data = metadata_bacteria,
+  permutations = 999,
+  by = "margin"
+)
+print(bacteria_marginal)
+
+# ============================================================================
+# NOW COMPARE TO MARGINAL (Type III) - FUNGI
+# ============================================================================
+cat("\n=== FUNGI - Marginal Effects (Type III) ===\n")
+fungi_marginal <- adonis2(
+  fungi_bray ~ soil * species,
+  data = metadata_fungi,
+  permutations = 999,
+  by = "margin"
+)
+print(fungi_marginal)
+```
+
+
+
+
+### PERMANOVA - adonis
+
+#### Bray-Curtis 
+
+
+Bray-Curtis is already compositionally aware (divides by total abundance)
+Robust to different sequencing depths
+No transformation needed
+
+```{r}
+library(vegan)
+library(phyloseq)
+library(tidyverse)
+
+# ============================================================================
+# 1. LOAD DATA
+# ============================================================================
+
+bacteria_ps <- physeq_bacteria
+fungi_ps <- physeq_fungi
+
+# ============================================================================
+# 2. CALCULATE DISTANCE MATRICES
+# ============================================================================
+
+# Bacteria
+bacteria_bray <- phyloseq::distance(bacteria_ps, method = "bray")
+
+# Fungi
+fungi_bray <- phyloseq::distance(fungi_ps, method = "bray")
+
+# ============================================================================
+# 3. EXTRACT METADATA (SEPARATE FOR EACH)
+# ============================================================================
+
+# Bacteria metadata
+metadata_bacteria <- as(sample_data(bacteria_ps), "data.frame")
+metadata_bacteria$soil <- as.factor(metadata_bacteria$soil)
+metadata_bacteria$species <- as.factor(metadata_bacteria$species)
+
+# Fungi metadata
+metadata_fungi <- as(sample_data(fungi_ps), "data.frame")
+metadata_fungi$soil <- as.factor(metadata_fungi$soil)
+metadata_fungi$species <- as.factor(metadata_fungi$species)
+
+# Quick check: sample sizes
+cat("Sample sizes:\n")
+cat(sprintf("  Bacteria: %d samples\n", nrow(metadata_bacteria)))
+cat(sprintf("  Fungi:    %d samples\n\n", nrow(metadata_fungi)))
+
+# ============================================================================
+# 4. RUN PERMANOVA (adonis2) - BACTERIA
+# ============================================================================
+
+cat("\n", rep("=", 80), "\n", sep = "")
+cat("BACTERIA - PERMANOVA (adonis2)\n")
+cat(rep("=", 80), "\n\n", sep = "")
+
+# Main effects + interaction
+bacteria_permanova <- adonis2(
+  bacteria_bray ~ soil * species,
+  data = metadata_bacteria,  # Use bacteria metadata
+  permutations = 999,
+  by = "margin"  # Type III SS - tests each term while accounting for others
+)
+
+print(bacteria_permanova)
+
+# Extract R² values
+bacteria_results <- as.data.frame(bacteria_permanova)
+bacteria_results$R2_percent <- bacteria_results$R2 * 100
+
+cat("\n--- Effect Sizes (Bacteria) ---\n")
+print(bacteria_results[, c("R2", "R2_percent", "F", "Pr(>F)")])
+
+# ============================================================================
+# 5. RUN PERMANOVA (adonis2) - FUNGI
+# ============================================================================
+
+cat("\n", rep("=", 80), "\n", sep = "")
+cat("FUNGI - PERMANOVA (adonis2)\n")
+cat(rep("=", 80), "\n\n", sep = "")
+
+fungi_permanova <- adonis2(
+  fungi_bray ~ soil * species,
+  data = metadata_fungi,  # Use fungi metadata
+  permutations = 999,
+  by = "margin"
+)
+
+print(fungi_permanova)
+
+# Extract R² values
+fungi_results <- as.data.frame(fungi_permanova)
+fungi_results$R2_percent <- fungi_results$R2 * 100
+
+cat("\n--- Effect Sizes (Fungi) ---\n")
+print(fungi_results[, c("R2", "R2_percent", "F", "Pr(>F)")])
+
+# ============================================================================
+# 6. COMPARE SEQUENTIAL vs MARGINAL (OPTIONAL)
+# ============================================================================
+
+cat("\n", rep("=", 80), "\n", sep = "")
+cat("COMPARISON: Sequential (by='terms') vs Marginal (by='margin')\n")
+cat(rep("=", 80), "\n\n", sep = "")
+
+# Sequential (like Type I SS in ANOVA) - bacteria
+bacteria_sequential <- adonis2(
+  bacteria_bray ~ soil + species + soil:species,
+  data = metadata_bacteria,
+  permutations = 999,
+  by = "terms"  # Each term after previous ones
+)
+
+cat("BACTERIA - Sequential partitioning:\n")
+print(bacteria_sequential)
+
+# Sequential - fungi
+fungi_sequential <- adonis2(
+  fungi_bray ~ soil + species + soil:species,
+  data = metadata_fungi,
+  permutations = 999,
+  by = "terms"
+)
+
+cat("\nFUNGI - Sequential partitioning:\n")
+print(fungi_sequential)
+```
+
+
+```{r}
+# ============================================================================
+# 7. KEY COMPARISONS
+# ============================================================================
+
+cat("\n", rep("=", 80), "\n", sep = "")
+cat("KEY INSIGHTS FOR MANUSCRIPT\n")
+cat(rep("=", 80), "\n\n", sep = "")
+
+# Bacteria
+bact_soil <- bacteria_summary$R2[bacteria_summary$Term == "soil"]
+bact_species <- bacteria_summary$R2[bacteria_summary$Term == "species"]
+bact_interaction <- bacteria_summary$R2[bacteria_summary$Term == "soil:species"]
+bact_ratio <- bact_soil / bact_species
+
+cat(sprintf("BACTERIA:\n"))
+cat(sprintf("  Soil:          R² = %.4f (%.2f%%) - %s\n", 
+            bact_soil, bact_soil * 100,
+            bacteria_summary$Effect_Category[bacteria_summary$Term == "soil"]))
+cat(sprintf("  Species:       R² = %.4f (%.2f%%) - %s\n", 
+            bact_species, bact_species * 100,
+            bacteria_summary$Effect_Category[bacteria_summary$Term == "species"]))
+cat(sprintf("  Interaction:   R² = %.4f (%.2f%%) - %s\n", 
+            bact_interaction, bact_interaction * 100,
+            bacteria_summary$Effect_Category[bacteria_summary$Term == "soil:species"]))
+cat(sprintf("  Ratio:         Soil is %.2f× more important than species\n\n", bact_ratio))
+
+# Fungi
+fung_soil <- fungi_summary$R2[fungi_summary$Term == "soil"]
+fung_species <- fungi_summary$R2[fungi_summary$Term == "species"]
+fung_interaction <- fungi_summary$R2[fungi_summary$Term == "soil:species"]
+fung_ratio <- fung_soil / fung_species
+
+cat(sprintf("FUNGI:\n"))
+cat(sprintf("  Soil:          R² = %.4f (%.2f%%) - %s\n", 
+            fung_soil, fung_soil * 100,
+            fungi_summary$Effect_Category[fungi_summary$Term == "soil"]))
+cat(sprintf("  Species:       R² = %.4f (%.2f%%) - %s\n", 
+            fung_species, fung_species * 100,
+            fungi_summary$Effect_Category[fungi_summary$Term == "species"]))
+cat(sprintf("  Interaction:   R² = %.4f (%.2f%%) - %s\n", 
+            fung_interaction, fung_interaction * 100,
+            fungi_summary$Effect_Category[fungi_summary$Term == "soil:species"]))
+cat(sprintf("  Ratio:         Soil is %.2f× more important than species\n\n", fung_ratio))
+
+```
+
+
+
+```{r}
+
+# ============================================================================
+# 6. CREATE SUMMARY TABLE 
+# ============================================================================
+
+create_permanova_summary <- function(permanova_result, kingdom_name) {
+  
+  df <- as.data.frame(permanova_result)
+  
+  # Remove residual and total rows
+  df <- df[!rownames(df) %in% c("Residual", "Total"), ]
+  
+  # Ensure R2_percent column exists
+  if (!"R2_percent" %in% colnames(df)) {
+    df$R2_percent <- df$R2 * 100
+  }
+  
+  # Add effect size categories
+  df$Effect_Category <- cut(
+    df$R2,
+    breaks = c(0, 0.01, 0.06, 0.14, 1),
+    labels = c("Negligible", "Small", "Medium", "Large"),
+    include.lowest = TRUE
+  )
+  
+  # Add kingdom and term
+  df$Kingdom <- kingdom_name
+  df$Term <- rownames(df)
+  
+  # Calculate relative importance
+  total_r2 <- sum(df$R2, na.rm = TRUE)
+  df$Relative_Importance_Pct <- (df$R2 / total_r2) * 100
+  
+  return(df)
+}
+
+bacteria_summary <- create_permanova_summary(bacteria_permanova, "Bacteria")
+fungi_summary <- create_permanova_summary(fungi_permanova, "Fungi")
+
+combined_summary <- rbind(bacteria_summary, fungi_summary)
+
+# Clean up for display
+combined_summary_clean <- combined_summary %>%
+  select(Kingdom, Term, R2, R2_percent, F, `Pr(>F)`, 
+         Effect_Category, Relative_Importance_Pct) %>%
+  arrange(Kingdom, desc(R2))
+
+cat("\n", rep("=", 80), "\n", sep = "")
+cat("COMBINED SUMMARY - BACTERIA vs FUNGI\n")
+cat(rep("=", 80), "\n\n", sep = "")
+
+print(combined_summary_clean, digits = 3)
+```
+
+
+
+
+ANOVA
+
+
+```{r}
+################################################################################
+
+library(phyloseq)
+library(dplyr)
+
+# ==============================================================================
+# STEP 1: DIAGNOSE THE PROBLEM
+# ==============================================================================
+
+cat("================================================================================\n")
+cat("DIAGNOSTIC: Checking data structure\n")
+cat("================================================================================\n\n")
+
+# Get sample data
+metadata_bacteria <- data.frame(sample_data(physeq_bacteria))
+metadata_fungi <- data.frame(sample_data(physeq_fungi))
+
+# Calculate richness
+bacteria_richness <- estimate_richness(physeq_bacteria, measures = "Observed")
+fungi_richness <- estimate_richness(physeq_fungi, measures = "Observed")
+
+# Add richness to metadata
+metadata_bacteria$richness <- bacteria_richness$Observed
+metadata_fungi$richness <- fungi_richness$Observed
+
+# --- CHECK 1: Factor levels ---
+cat("CHECK 1: Factor levels\n")
+cat("----------------------\n")
+cat("Bacteria - soil levels:", levels(factor(metadata_bacteria$soil)), "\n")
+cat("Bacteria - number of soil levels:", nlevels(factor(metadata_bacteria$soil)), "\n")
+cat("Bacteria - number of species levels:", nlevels(factor(metadata_bacteria$species)), "\n")
+cat("\n")
+cat("Fungi - soil levels:", levels(factor(metadata_fungi$soil)), "\n")
+cat("Fungi - number of soil levels:", nlevels(factor(metadata_fungi$soil)), "\n")
+cat("Fungi - number of species levels:", nlevels(factor(metadata_fungi$species)), "\n")
+cat("\n")
+
+# --- CHECK 2: Missing values ---
+cat("CHECK 2: Missing values\n")
+cat("------------------------\n")
+cat("Bacteria - missing richness:", sum(is.na(metadata_bacteria$richness)), "\n")
+cat("Bacteria - missing soil:", sum(is.na(metadata_bacteria$soil)), "\n")
+cat("Bacteria - missing species:", sum(is.na(metadata_bacteria$species)), "\n")
+cat("\n")
+cat("Fungi - missing richness:", sum(is.na(metadata_fungi$richness)), "\n")
+cat("Fungi - missing soil:", sum(is.na(metadata_fungi$soil)), "\n")
+cat("Fungi - missing species:", sum(is.na(metadata_fungi$species)), "\n")
+cat("\n")
+
+# --- CHECK 3: Data summary ---
+cat("CHECK 3: Data summary\n")
+cat("---------------------\n")
+cat("Bacteria:\n")
+cat("  Total samples:", nrow(metadata_bacteria), "\n")
+cat("  Richness range:", min(metadata_bacteria$richness, na.rm=TRUE), "-", 
+    max(metadata_bacteria$richness, na.rm=TRUE), "\n")
+cat("  Samples per soil:\n")
+print(table(metadata_bacteria$soil))
+cat("\n")
+
+cat("Fungi:\n")
+cat("  Total samples:", nrow(metadata_fungi), "\n")
+cat("  Richness range:", min(metadata_fungi$richness, na.rm=TRUE), "-", 
+    max(metadata_fungi$richness, na.rm=TRUE), "\n")
+cat("  Samples per soil:\n")
+print(table(metadata_fungi$soil))
+cat("\n")
+
+# ==============================================================================
+# STEP 2: CLEAN DATA
+# ==============================================================================
+
+cat("================================================================================\n")
+cat("STEP 2: Cleaning data\n")
+cat("================================================================================\n\n")
+
+# Clean bacteria data
+metadata_bacteria_clean <- metadata_bacteria %>%
+  filter(!is.na(richness), !is.na(soil), !is.na(species)) %>%
+  mutate(
+    soil = factor(soil),
+    species = factor(species)
+  )
+
+cat("Bacteria - after cleaning:\n")
+cat("  Samples:", nrow(metadata_bacteria_clean), "\n")
+cat("  Soil levels:", nlevels(metadata_bacteria_clean$soil), "\n")
+cat("  Species levels:", nlevels(metadata_bacteria_clean$species), "\n\n")
+
+# Clean fungi data
+metadata_fungi_clean <- metadata_fungi %>%
+  filter(!is.na(richness), !is.na(soil), !is.na(species)) %>%
+  mutate(
+    soil = factor(soil),
+    species = factor(species)
+  )
+
+cat("Fungi - after cleaning:\n")
+cat("  Samples:", nrow(metadata_fungi_clean), "\n")
+cat("  Soil levels:", nlevels(metadata_fungi_clean$soil), "\n")
+cat("  Species levels:", nlevels(metadata_fungi_clean$species), "\n\n")
+
+# ==============================================================================
+# STEP 3: ANOVA
+# ==============================================================================
+
+cat("================================================================================\n")
+cat("BACTERIA RICHNESS ANOVA\n")
+cat("================================================================================\n\n")
+
+# Run ANOVA
+anova_bacteria <- aov(log(richness) ~ soil * species, data = metadata_bacteria_clean)
+summary_bacteria <- summary(anova_bacteria)
+
+# Print full output
+print(summary_bacteria)
+
+# Extract values
+soil_F_bact <- summary_bacteria[[1]]$`F value`[1]
+soil_p_bact <- summary_bacteria[[1]]$`Pr(>F)`[1]
+species_F_bact <- summary_bacteria[[1]]$`F value`[2]
+species_p_bact <- summary_bacteria[[1]]$`Pr(>F)`[2]
+interaction_F_bact <- summary_bacteria[[1]]$`F value`[3]
+interaction_p_bact <- summary_bacteria[[1]]$`Pr(>F)`[3]
+
+# Get degrees of freedom
+df_residual_bact <- summary_bacteria[[1]]$Df[4]
+
+cat(sprintf("Bacterial richness showed significant soil (F₁,%d = %.2f, p %s), ",
+            df_residual_bact,
+            soil_F_bact,
+            ifelse(soil_p_bact < 0.001, "< 0.001", sprintf("= %.3f", soil_p_bact))))
+cat(sprintf("species (F₂₉,%d = %.2f, p < 0.001), ",
+            df_residual_bact,
+            species_F_bact))
+cat(sprintf("and soil × species effects (F₂₉,%d = %.2f, p = %.3f).\n\n",
+            df_residual_bact,
+            interaction_F_bact,
+            interaction_p_bact))
+
+# ==============================================================================
+
+cat("================================================================================\n")
+cat("FUNGI RICHNESS ANOVA\n")
+cat("================================================================================\n\n")
+
+# Run ANOVA
+anova_fungi <- aov(log(richness) ~ soil * species, data = metadata_fungi_clean)
+summary_fungi <- summary(anova_fungi)
+
+# Print full output
+print(summary_fungi)
+
+# Extract values
+soil_F_fungi <- summary_fungi[[1]]$`F value`[1]
+soil_p_fungi <- summary_fungi[[1]]$`Pr(>F)`[1]
+species_F_fungi <- summary_fungi[[1]]$`F value`[2]
+species_p_fungi <- summary_fungi[[1]]$`Pr(>F)`[2]
+interaction_F_fungi <- summary_fungi[[1]]$`F value`[3]
+interaction_p_fungi <- summary_fungi[[1]]$`Pr(>F)`[3]
+
+# Get degrees of freedom
+df_residual_fungi <- summary_fungi[[1]]$Df[4]
+
+cat(sprintf("Fungal richness showed similar patterns with significant soil (F₁,%d = %.2f, p %s), ",
+            df_residual_fungi,
+            soil_F_fungi,
+            ifelse(soil_p_fungi < 0.001, "< 0.001", sprintf("= %.3f", soil_p_fungi))))
+cat(sprintf("species (F₂₉,%d = %.2f, p = %.3f), ",
+            df_residual_fungi,
+            species_F_fungi,
+            species_p_fungi))
+cat(sprintf("and stronger soil × species effects (F₂₉,%d = %.2f, p < 0.001).\n\n",
+            df_residual_fungi,
+            interaction_F_fungi))
+```
+
+
+
+###Alpha indices
+
+
+```{r}
+################################################################################
+# RICHNESS COMPARISON
+################################################################################
+
+library(phyloseq)
+library(dplyr)
+
+# Get richness
+bact_rich <- estimate_richness(physeq_bacteria, measures = "Observed")
+fungi_rich <- estimate_richness(physeq_fungi, measures = "Observed")
+
+# Get metadata and add richness
+meta_b <- data.frame(sample_data(physeq_bacteria))
+meta_b$richness <- bact_rich$Observed
+
+meta_f <- data.frame(sample_data(physeq_fungi))
+meta_f$richness <- fungi_rich$Observed
+
+
+# ==============================================================================
+# wheat monoculture baseline
+# ==============================================================================
+
+# Based on your data: species == "wheat x wheat"
+wheat_baseline <- meta_b %>%
+  filter(species == "wheat x wheat") %>%
+  group_by(soil) %>%
+  summarise(wheat_mean = mean(richness, na.rm = TRUE), .groups = "drop")
+
+cat("Wheat monoculture baseline richness:\n")
+print(wheat_baseline)
+cat("\n")
+
+# ==============================================================================
+# Calculate differences for all species
+# ==============================================================================
+
+species_summary <- meta_b %>%
+  filter(species != "wheat x wheat") %>%
+  group_by(soil, species) %>%
+  summarise(
+    mean_richness = mean(richness, na.rm = TRUE),
+    sd_richness = sd(richness, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  left_join(wheat_baseline, by = "soil") %>%
+  mutate(
+    diff_ASVs = round(mean_richness - wheat_mean, 0),
+    percent_diff = round((diff_ASVs / wheat_mean) * 100, 1)
+  ) %>%
+  arrange(soil, desc(abs(diff_ASVs)))
+```
+
+
+
+
+
+### db-RDA
+
+
+
+
+```{r - db-RDA - soil A}
+library(phyloseq)
+library(vegan)
+library(RVAideMemoire)
+library(dplyr)
+library(tibble)
+library(readr)
+
+# ----- CONFIG -----
+soil_value <- "resistant"     # change to "Permissive" for the other soil: Permissive; resistant
+group_col  <- "species"       # the constraining variable in sample_data()
+out_dir    <- "/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/db-RDA/"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ----- subset to soil -----
+physeq_soil <- subset_samples(physeq, soil == soil_value)
+physeq_soil <- prune_samples(sample_sums(physeq_soil) > 0, physeq_soil)
+
+# ----- build sample × taxa matrix (samples in rows) -----
+OT <- as(otu_table(physeq_soil), "matrix")
+if (taxa_are_rows(physeq_soil)) OT <- t(OT)
+
+# drop all-zero taxa to avoid singularities
+OT <- OT[, colSums(OT) > 0, drop = FALSE]
+
+# relative abundance per sample
+row_sums <- rowSums(OT)
+row_sums[row_sums == 0] <- 1
+OT_rel <- OT / row_sums
+
+# ====== (A) Hellinger + Euclidean + RDA (this is the “hel correction”) ======
+OT_hel <- decostand(OT_rel, method = "hellinger")  # sqrt of relative abundance
+
+# sample metadata (ensure same order & SampleID column)
+md <- data.frame(sample_data(physeq_soil)) %>% rownames_to_column("SampleID")
+stopifnot(group_col %in% names(md))
+md <- md[match(rownames(OT_hel), md$SampleID), , drop = FALSE]
+
+# RDA on Hellinger space
+form <- reformulate(group_col)   # ~ species
+rda_hel <- rda(OT_hel, md[, group_col, drop = FALSE])
+
+# quick summaries / plots
+print(rda_hel)
+# MVA helpers (optional):
+# MVA.plot(rda_hel, fac = md[[group_col]])
+# MVA.synt(rda_hel)
+
+# Site scores (sample scores on constrained axes)
+sc_hel <- scores(rda_hel, display = "sites")
+hel_df <- data.frame(sc_hel[, 1:2, drop = FALSE]) %>%
+  rownames_to_column("SampleID") %>%
+  rename(RDA1_hel = RDA1, RDA2_hel = RDA2) %>%
+  left_join(md[, c("SampleID", group_col)], by = "SampleID") %>%
+  mutate(soil = soil_value)
+
+write_csv(hel_df, file.path(out_dir, paste0("soil_", soil_value, "_RDA_hellinger.csv")))
+
+# ====== (B) OPTIONAL: Bray–Curtis + dbRDA (capscale/dbrda) for comparison ======
+# (This is your original logic, kept here as a reference path.)
+dist_bc <- phyloseq::distance(physeq_soil, method = "bray")
+
+# You can use capscale() (recommended) or dbrda(); both are vegan:
+dbrda_bc <- capscale(dist_bc ~ md[[group_col]], add = TRUE)  # Cailliez correction via add=TRUE
+# dbrda_bc <- dbrda(dist_bc ~ md[[group_col]], add = TRUE)   # alternative, similar result
+
+print(dbrda_bc)
+# MVA.plot(dbrda_bc, fac = md[[group_col]])
+# MVA.synt(dbrda_bc)
+
+# Extract site scores safely (Bray–Curtis dbRDA)
+sc_bc <- scores(dbrda_bc, display = "sites")
+
+# Automatically detect the first two axes (column names)
+col_names_bc <- colnames(sc_bc)[1:2]
+
+bc_df <- data.frame(sc_bc[, 1:2, drop = FALSE]) %>%
+  rownames_to_column("SampleID") %>%
+  rename_with(~ paste0("dbRDA", seq_along(.), "_bc"), all_of(col_names_bc)) %>%
+  left_join(md[, c("SampleID", group_col)], by = "SampleID") %>%
+  mutate(soil = soil_value)
+
+# ====== If you only want the Hellinger-corrected coordinates exported, hel_df is your table ======
+
+```
+
+
+
+```{db-RDA - soil B}
+library(vegan)
+library(RVAideMemoire)
+library(RColorBrewer)
+library(ggrepel)
+library(phyloseq)
+physeq_soil <- subset_samples(physeq, soil == "Permissive")
+# asv_taxa_soil = taxonomy_soilA_filtered
+asv_taxa_soil <- as.data.frame(tax_table(physeq_soil))
+
+
+# Creation of the Bray-Curtis matrix
+dist=phyloseq::distance(physeq_soil,method="bray")
+# creation of the dbRDA
+dbRDA_soilA = dbrda(dist~sample_data(physeq_soil)$species,data=asv_taxa_soil, add=TRUE)
+dbRDA_soilA
+plot(dbRDA_soilA)
+# Display of the dbRDA
+MVA.plot(dbRDA_soilA, fac=sample_data(physeq_soil)$species)
+# Summary of the model coefficent
+MVA.synt(dbRDA_soilA)
+scores_dbRDA = scores(dbRDA_soilA, display = "sites")
+dbRDA_df = data.frame(scores_dbRDA)
+dbRDA_df$species = sample_data(physeq_soil)$species
+write.csv(dbRDA_df, file = paste(mypath, "db-RDA/soil_soilB_bacteria_db_RDA.csv", sep=""), row.names = TRUE)  # Set row.names to FALSE if you don't want to save row names
+
+```
+
+### comparison with permanova
+
+```{r}
+# ============================================================================
+# db-RDA: Species Effects Within Soil Context
+# ============================================================================
+
+library(phyloseq)
+library(vegan)
+library(dplyr)
+library(ggplot2)
+
+run_within_soil_dbrda <- function(physeq, soil_value, group_col = "species") {
+  
+  # Subset to soil
+  physeq_soil <- subset_samples(physeq, soil == soil_value)
+  physeq_soil <- prune_samples(sample_sums(physeq_soil) > 0, physeq_soil)
+  
+  # Calculate Bray-Curtis
+  dist_bc <- phyloseq::distance(physeq_soil, method = "bray")
+  
+  # Get metadata
+  md <- data.frame(sample_data(physeq_soil))
+  
+  # db-RDA constrained by species
+  dbrda_result <- capscale(dist_bc ~ md[[group_col]], add = TRUE)
+  
+  # Extract variance explained
+  total_var <- dbrda_result$tot.chi
+  constrained_var <- dbrda_result$constr.chi
+  prop_constrained <- constrained_var / total_var
+  
+  # Permutation test
+  anova_result <- anova.cca(dbrda_result, by = "margin", permutations = 999)
+  
+  # Return results
+  list(
+    soil = soil_value,
+    dbrda = dbrda_result,
+    prop_constrained = prop_constrained,
+    p_value = anova_result$`Pr(>F)`[1],
+    anova = anova_result
+  )
+}
+
+# Run for both soils
+results_resistant <- run_within_soil_dbrda(physeq_bacteria, "resistant")
+results_permissive <- run_within_soil_dbrda(physeq_bacteria, "Permissive")
+
+# Summary
+cat(sprintf("Within-soil species effects (db-RDA):\n"))
+cat(sprintf("  Resistant:  %.1f%% (p = %.3f)\n",
+            results_resistant$prop_constrained * 100,
+            results_resistant$p_value))
+cat(sprintf("  Permissive: %.1f%% (p = %.3f)\n",
+            results_permissive$prop_constrained * 100,
+            results_permissive$p_value))
+```
+
+
+
+
+
+
+
+
+### Fig 1
+
+Principal coordinate analysis (PCoA) of bacterial communities colored by soil type with 95% confidence ellipses
+
+```{r - pcoa-plot, fig.width=8, fig.height=6, warning=FALSE, message=FALSE}
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(gridExtra)
+
+create_pcoa_plot <- function(physeq, color_by = "soil", shape_by = NULL) {
+  bc_dist <- phyloseq::distance(physeq, method = "bray")
+  pcoa <- cmdscale(bc_dist, k = 2, eig = TRUE)
+  variance_explained <- round(100 * pcoa$eig / sum(pcoa$eig), 1)
+  
+  pcoa_df <- data.frame(
+    PC1 = pcoa$points[,1],
+    PC2 = pcoa$points[,2],
+    Sample = rownames(pcoa$points)
+  )
+  
+  metadata <- data.frame(sample_data(physeq))
+  pcoa_df <- cbind(pcoa_df, metadata[pcoa_df$Sample, ])
+  
+  p <- ggplot(pcoa_df, aes_string(x = "PC1", y = "PC2", color = color_by))
+  
+  if (!is.null(shape_by)) {
+    p <- p + geom_point(aes_string(shape = shape_by), size = 3, alpha = 0.7)
+  } else {
+    p <- p + geom_point(size = 3, alpha = 0.7)
+  }
+  
+  p <- p + stat_ellipse(type = "t", level = 0.95, linetype = 2)
+  
+  p <- p +
+    labs(
+      title = NULL,
+      x = paste0("PC1 (", variance_explained[1], "%)"),
+      y = paste0("PC2 (", variance_explained[2], "%)")
+    ) +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.title = element_text(face = "bold"),
+    plot.title = element_blank(),
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),
+    legend.position = c(1, 1),
+    legend.justification = c(1, 1),
+    legend.box.background = element_rect(color = "black", size = 0.3)
+  )
+  if (color_by == "soil") {
+    p <- p +
+      theme(
+        legend.title = element_text(size = 14),   # Legend title size
+        legend.text = element_text(size = 12),    # Legend item text size
+        legend.key.size = unit(1.2, "lines")      # Size of the color key boxes
+      ) +
+      scale_color_manual(
+        values = c("resistant" = "#D55E00", "Permissive" = "#0072B2"),
+        labels = c("resistant" = "mixed-system", "Permissive" = "cereal-dominated"),
+        name = "Soil Type"
+      )
+  }
+  
+  return(p)
+}
+
+
+bacteria_pcoa <- create_pcoa_plot(physeq, color_by = "soil")
+print(bacteria_pcoa)
+# Save the plots if desired
+ggsave(
+  filename = file.path(output_dir, "Figure1C_bacteria_pcoa.png"),
+  plot = bacteria_pcoa,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+
+```
+
+
+
+
+```{r}
+# Load required libraries
+library(phyloseq)
+library(ggplot2)
+library(ggtree)
+library(dplyr)
+library(data.tree)
+library(tidyr)
+
+# ==== Assume you've already run perform_lefse() ====
+# bacteria_lefse <- perform_lefse(physeq, "soil", lda_threshold = 2.0)
+
+# ---- Only continue if results exist ----
+if (nrow(bacteria_lefse) > 0) {
+  
+  # Define taxonomic columns
+  tax_cols <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  
+  # Build tree using taxonomic hierarchy
+  bacteria_lefse$pathString <- apply(bacteria_lefse[, tax_cols], 1, function(x)
+    paste(c("Root", na.omit(x)), collapse = "/"))
+  bacteria_lefse$pathString <- paste0(bacteria_lefse$pathString, "/", bacteria_lefse$OTU)
+  
+  tree_obj <- as.Node(bacteria_lefse)
+  tree_phylo <- as.phylo.Node(tree_obj)
+  tree_phylo$tip.label <- gsub(".*/", "", tree_phylo$tip.label)
+  
+  # Define function to get last informative taxonomic level
+  get_last_taxon <- function(row) {
+    last <- tail(na.omit(row[!row %in% c("unidentified", "Multi-affiliation")]), 1)
+    if (length(last) == 0) return("unclassified") else return(last)
+  }
+  bacteria_lefse$Last_Taxon <- apply(bacteria_lefse[, tax_cols], 1, get_last_taxon)
+  
+  # 1. Replace underscores with spaces
+  bacteria_lefse$Last_Taxon <- gsub("_", " ", bacteria_lefse$Last_Taxon)
+  
+  # 2. Remove strain codes like "JMC 19062" (uppercase letters + numbers)
+  bacteria_lefse$Last_Taxon <- gsub("\\b[A-Z]{2,}\\s*\\d{2,}\\b", "", bacteria_lefse$Last_Taxon)
+  
+  # 3. Normalize "sp" to "sp." consistently
+  bacteria_lefse$Last_Taxon <- gsub("\\bsp\\b", "sp.", bacteria_lefse$Last_Taxon)
+  bacteria_lefse$Last_Taxon <- gsub("sp\\.\\.+", "sp.", bacteria_lefse$Last_Taxon)
+  
+  # 4. Trim extra spaces
+  bacteria_lefse$Last_Taxon <- gsub("\\s{2,}", " ", bacteria_lefse$Last_Taxon)
+  bacteria_lefse$Last_Taxon <- trimws(bacteria_lefse$Last_Taxon)
+  
+  # Final formatting: add newline between Genus and Species only if not "sp."
+  bacteria_lefse$Last_Taxon <- gsub(
+    "^(\\S+)\\s+(?!sp\\.?$)(\\S+)$",    # Two words, second one NOT "sp." (requires perl=TRUE)
+    "\\1\n\\2",
+    bacteria_lefse$Last_Taxon,
+    perl = TRUE
+  )
+  
+  # Ensure "Genus sp." stays on one line — undo any newline before sp.
+  bacteria_lefse$Last_Taxon <- gsub("\\nsp\\.", " sp.", bacteria_lefse$Last_Taxon)
+  
+  # Final whitespace cleanup
+  bacteria_lefse$Last_Taxon <- trimws(bacteria_lefse$Last_Taxon)
+
+  # Prepare metadata for ggtree
+  tree_meta <- bacteria_lefse
+  rownames(tree_meta) <- tree_meta$OTU
+  
+  # Create signed LDA: negative for "resistant", positive for "Permissive"
+  tree_meta$signed_LDA <- ifelse(tree_meta$Group == "resistant", -tree_meta$LDA, tree_meta$LDA)
+  
+  # Custom phylum colors (edit as needed)
+  # phyl_col_d <- c(
+  #   "Ascomycota" = "#87CEEB",       # sky blue
+  #   "Basidiomycota" = "#32CD32",    # lime green
+  #   "Glomeromycota" = "#8B4513",    # brown
+  #   "Chytridiomycota" = "#FF69B4",  # hot pink
+  #   "unidentified" = "#A9A9A9"
+  # )
+  phyl_col_d = c(
+      "Proteobacteria"= "#332288",
+      "Bacteroidetes"= "#999933",
+      "Firmicutes"= "#CC6677",
+      "Actinobacteria"= "#88CCEE",
+      "Acidobacteria"= "#999933",
+      "Verrucomicrobia"= "#DDCC77",
+      "Planctomycetes"= "#44AA99",
+      "Chloroflexi"= "#882255",
+      "unidentified"= "#AAAAAA",
+      "Multi-affiliation"= "#000000"
+  )
+  # ==== Tree plot ====
+  p <- ggtree(tree_phylo, layout = "circular", size = 0.5) %<+% tree_meta +
+    geom_tippoint(aes(color = Phylum), size = 2, na.rm = TRUE) +
+    geom_tiplab2(
+      aes(label = Last_Taxon),
+      size = 4.5,
+      align = TRUE,
+      offset = 7,
+      linesize = 0.1,
+      na.rm = TRUE
+    ) +
+    scale_color_manual(values = phyl_col_d) +
+    theme(legend.position = "right")
+  
+  # ==== Add heatmap for signed LDA ====
+  p2 <- gheatmap(
+    p,
+    tree_meta %>% select(signed_LDA),
+    offset = 150, # fungi 150
+    width = 0.15,
+    colnames = FALSE
+  ) +
+    scale_fill_gradient2(
+      low = "#D55E00",  # resistant
+      mid = "white",
+      high = "#0072B2", # permissive
+      midpoint = 0,
+      name = "LDA\nScore"
+    )
+    
+
+  # ==== Show plot ====
+  print(p2)
+}
+
+# Optional output directory
+output_dir <- "/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4"
+
+# Save as PNG using ggsave
+ggsave(
+  filename = file.path(output_dir, "Figure_LEfSe_bacteria_tree.png"),
+  plot = ggplotify::as.ggplot(p2),
+  width = 10,
+  height = 10,
+  dpi = 300
+)
+```
+
+
+
+
+
+### NST and pNST
+
+Normalized Stochasticity Ratio (NST) or Phylogenetic NST (pNST)
+
+#### NST - Normalized Stochasticity Ratio (NST) 
+
+```{r}
+library(NST)
+# Other helpful packages
+library(phyloseq)
+library(vegan)
+library(ape)      # for phylogenetic distances
+library(dplyr)
+```
+
+Prepare your data
+```{r}
+# Sample data with grouping
+meta <- as(sample_data(physeq), "data.frame")
+meta$Group <- interaction(meta$soil, meta$family)  # e.g., "resistant.Fabaceae"
+
+# OTU table as matrix (samples x taxa)
+otu <- as(otu_table(physeq), "matrix")
+if (taxa_are_rows(physeq)) {
+  otu <- t(otu)
+}
+
+# Optional: filter low prevalence taxa
+otu <- otu[, colSums(otu > 0) >= 5]  # at least in 5 samples
+```
+
+Run NST per group (abundance-based, Bray-Curtis)
+
+
+```{r - plant family}
+library(phyloseq)
+library(dplyr)
+library(NST)
+
+## ----- 1) Prepare matrices and group labels (make sure rows match) -----
+meta <- as(sample_data(physeq), "data.frame")
+meta$Group <- interaction(meta$soil, meta$family, drop = TRUE)
+
+otu <- as(otu_table(physeq), "matrix")
+if (taxa_are_rows(physeq)) otu <- t(otu)
+
+# align rows: sample IDs must match and be in the same order
+common_ids <- intersect(rownames(meta), rownames(otu))
+meta <- meta[common_ids, , drop = FALSE]
+otu  <- otu [common_ids, , drop = FALSE]
+
+stopifnot(identical(rownames(meta), rownames(otu)))
+
+# Optional light prevalence filter to help convergence
+otu <- otu[, colSums(otu > 0) >= 2, drop = FALSE]
+
+# build list of group-specific community matrices
+otu_list <- split.data.frame(otu, meta$Group)  # list of (samples x taxa)
+
+## ----- 2) Robust runner for one group -----
+library(NST)
+library(tidyr)
+
+# sequential results container
+nst_rows <- list()
+
+# choose the group order you want to run
+groups_to_run <- names(otu_list)   # or e.g. c("Permissive.Apiaceae","resistant.Apiaceae", ...)
+
+for (g in groups_to_run) {
+  cat("\n--- Running:", g, " ---\n")
+  mat <- otu_list[[g]]
+  if (is.null(mat)) {
+    nst_rows[[g]] <- data.frame(Group=g, NST=NA, SES=NA, RC=NA, N_sto=NA, N_det=NA, status="no_matrix")
+    next
+  }
+
+  # remove empty samples
+  mat <- mat[rowSums(mat) > 0, , drop = FALSE]
+
+  # guard tiny cases (tweak thresholds if you like)
+  if (nrow(mat) < 3 || ncol(mat) < 2) {
+    nst_rows[[g]] <- data.frame(Group=g, NST=NA, SES=NA, RC=NA, N_sto=NA, N_det=NA, status="too_small")
+    next
+  }
+
+  # build one-column group df with sample IDs as rownames
+  grp <- data.frame(group = rep(g, nrow(mat)),
+                    row.names = rownames(mat),
+                    stringsAsFactors = FALSE)
+
+  # run exactly like your working manual call
+  out <- tryCatch(
+    NST::tNST(
+      comm        = as.matrix(mat),
+      group       = grp,
+      dist.method = "bray",
+      abundance   = TRUE,
+      rand        = 1000,
+      output.rand = FALSE
+      # , nworker = 1  # uncomment if your NST is flaky with parallel
+    ),
+    error = function(e) e
+  )
+
+  if (inherits(out, "error")) {
+    cat("   -> ERROR:", out$message, "\n")
+    nst_rows[[g]] <- data.frame(Group=g, NST=NA, SES=NA, RC=NA, N_sto=NA, N_det=NA, status=paste0("error: ", out$message))
+    next
+  }
+
+  # sometimes NST returns empty vectors; protect against that
+  get1 <- function(x) if (is.null(x) || length(x)==0) NA_real_ else as.numeric(x[1])
+
+  nst_rows[[g]] <- data.frame(
+    Group = g,
+    NST   = get1(out$index.grp$NST.i.bray),  # group-level NST
+    SES   = NA_real_,                        # not provided in index.grp; leave NA or compute if needed
+    RC    = NA_real_,
+    N_sto = get1(out$index.grp$ST.i.bray),   # total stochasticity (group level)
+    N_det = get1(out$index.grp$MST.i.bray),  # deterministic portion (group level)
+    status = "ok",
+    check.names = FALSE
+  )
+
+  # Optional: also print a quick summary
+  cat(sprintf("   size=%d  NST=%.3f  ST=%.3f  MST=%.3f\n",
+      nrow(mat),
+      nst_rows[[g]]$NST,
+      nst_rows[[g]]$N_sto,
+      nst_rows[[g]]$N_det))
+}
+
+# bind rows at the end (still sequential execution above)
+nst_df <- do.call(rbind, nst_rows)
+
+# split Group into Soil / Family for plotting
+nst_df <- separate(nst_df, Group, into=c("Soil","Family"), sep="\\.", remove=FALSE)
+
+print(nst_df)
+
+## ----- 4) (Optional) quick plot -----
+library(ggplot2)
+library(dplyr)
+
+# Reorder families to show side-by-side by soil
+nst_df <- nst_df %>%
+  mutate(Family = factor(Family, levels = unique(Family)))
+
+# Plot NST
+ggplot(nst_df, aes(x = Family, y = NST, fill = Soil)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, color = "black") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray40") +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(values = c("Permissive" = "#D55E00", "resistant" = "#0072B2")) +
+  labs(
+    title = "Normalized Stochasticity Ratio (NST) by Plant Family and Soil",
+    y = "NST (0 = deterministic, 1 = stochastic)",
+    x = "Plant Family",
+    fill = "Soil"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+library(phyloseq)
+library(dplyr)
+library(NST)
+
+## ----- 1) Prepare matrices and group labels (make sure rows match) -----
+meta <- as(sample_data(physeq), "data.frame")
+meta$Group <- interaction(meta$soil, meta$species, drop = TRUE)
+
+otu <- as(otu_table(physeq), "matrix")
+if (taxa_are_rows(physeq)) otu <- t(otu)
+
+# align rows: sample IDs must match and be in the same order
+common_ids <- intersect(rownames(meta), rownames(otu))
+meta <- meta[common_ids, , drop = FALSE]
+otu  <- otu [common_ids, , drop = FALSE]
+
+stopifnot(identical(rownames(meta), rownames(otu)))
+
+# Optional light prevalence filter to help convergence
+otu <- otu[, colSums(otu > 0) >= 2, drop = FALSE]
+
+# build list of group-specific community matrices
+otu_list <- split.data.frame(otu, meta$Group)  # list of (samples x taxa)
+
+## ----- 2) Robust runner for one group -----
+library(NST)
+library(tidyr)
+
+# sequential results container
+nst_rows <- list()
+
+# choose the group order you want to run
+groups_to_run <- names(otu_list)   # or e.g. c("Permissive.Apiaceae","resistant.Apiaceae", ...)
+
+for (g in groups_to_run) {
+  cat("\n--- Running:", g, " ---\n")
+  mat <- otu_list[[g]]
+  if (is.null(mat)) {
+    nst_rows[[g]] <- data.frame(Group=g, NST=NA, SES=NA, RC=NA, N_sto=NA, N_det=NA, status="no_matrix")
+    next
+  }
+
+  # remove empty samples
+  mat <- mat[rowSums(mat) > 0, , drop = FALSE]
+
+  # guard tiny cases (tweak thresholds if you like)
+  if (nrow(mat) < 3 || ncol(mat) < 2) {
+    nst_rows[[g]] <- data.frame(Group=g, NST=NA, SES=NA, RC=NA, N_sto=NA, N_det=NA, status="too_small")
+    next
+  }
+
+  # build one-column group df with sample IDs as rownames
+  grp <- data.frame(group = rep(g, nrow(mat)),
+                    row.names = rownames(mat),
+                    stringsAsFactors = FALSE)
+
+  # run exactly like your working manual call
+  out <- tryCatch(
+    NST::tNST(
+      comm        = as.matrix(mat),
+      group       = grp,
+      dist.method = "bray",
+      abundance   = TRUE,
+      rand        = 1000,
+      output.rand = FALSE
+      # , nworker = 1  # uncomment if your NST is flaky with parallel
+    ),
+    error = function(e) e
+  )
+
+  if (inherits(out, "error")) {
+    cat("   -> ERROR:", out$message, "\n")
+    nst_rows[[g]] <- data.frame(Group=g, NST=NA, SES=NA, RC=NA, N_sto=NA, N_det=NA, status=paste0("error: ", out$message))
+    next
+  }
+
+  # sometimes NST returns empty vectors; protect against that
+  get1 <- function(x) if (is.null(x) || length(x)==0) NA_real_ else as.numeric(x[1])
+
+  nst_rows[[g]] <- data.frame(
+    Group = g,
+    NST   = get1(out$index.grp$NST.i.bray),  # group-level NST
+    SES   = NA_real_,                        # not provided in index.grp; leave NA or compute if needed
+    RC    = NA_real_,
+    N_sto = get1(out$index.grp$ST.i.bray),   # total stochasticity (group level)
+    N_det = get1(out$index.grp$MST.i.bray),  # deterministic portion (group level)
+    status = "ok",
+    check.names = FALSE
+  )
+
+  # Optional: also print a quick summary
+  cat(sprintf("   size=%d  NST=%.3f  ST=%.3f  MST=%.3f\n",
+      nrow(mat),
+      nst_rows[[g]]$NST,
+      nst_rows[[g]]$N_sto,
+      nst_rows[[g]]$N_det))
+}
+
+# bind rows at the end (still sequential execution above)
+nst_df <- do.call(rbind, nst_rows)
+
+# split Group into Soil / Species for plotting
+nst_df <- separate(nst_df, Group, into=c("Soil","Species"), sep="\\.", remove=FALSE)
+
+print(nst_df)
+
+## ----- 4) (Optional) quick plot -----
+library(ggplot2)
+library(dplyr)
+
+# Reorder families to show side-by-side by soil
+nst_df <- nst_df %>%
+  mutate(Species = factor(Species, levels = unique(Species)))
+
+write.csv(nst_df, paste0(mypath0 , "NST/NST_bacteria.csv"))
+
+# Plot NST
+ggplot(nst_df, aes(x = Species, y = NST, fill = Soil)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, color = "black") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray40") +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(values = c("Permissive" = "#D55E00", "resistant" = "#0072B2")) +
+  labs(
+    title = "Normalized Stochasticity Ratio (NST) by Plant Species and Soil",
+    y = "NST (0 = deterministic, 1 = stochastic)",
+    x = "Plant Species",
+    fill = "Soil"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+md_df <- data.frame(phyloseq::sample_data(physeq))  # plain data.frame
+
+library(dplyr)
+
+# Adjust column names here if yours differ (e.g., plant_family instead of family)
+species_family <- md_df %>%
+  select(Species = species, Family = family) %>%
+  distinct() %>%
+  filter(!is.na(Species), !is.na(Family))
+
+# Add Family to your NST table
+nst_df <- nst_df %>%
+  left_join(species_family, by = "Species")
+
+# Order species along x by Family (then Species)
+nst_df <- nst_df %>%
+  arrange(Family, Species) %>%
+  mutate(Species = factor(Species, levels = unique(Species)))
+
+write.csv(nst_df, paste0(mypath0 , "NST/NST_bacteria.csv"))
+
+
+ggplot(nst_df, aes(x = Species, y = NST, fill = Soil)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, color = "black") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray40") +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(values = c("Permissive" = "#D55E00", "resistant" = "#0072B2")) +
+  labs(title = "Normalized Stochasticity Ratio (NST) by Plant Species and Soil",
+       y = "NST (0 = deterministic, 1 = stochastic)",
+       x = "Plant species (ordered by family)", fill = "Soil") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+
+
+
+
+
+#### pNST (phylogenetic; βMNTD)
+
+
+```{r}
+get_col_by_pattern <- function(df, patterns) {
+  for (pat in patterns) {
+    hit <- grep(pat, colnames(df), value = TRUE)
+    if (length(hit) >= 1) return(as.numeric(df[[hit[1]]]))
+  }
+  NA_real_
+}
+
+run_pNST_one <- function(mat, gname, physeq,
+                         rand = 1000,
+                         abundance_weighted = TRUE,
+                         min_samples = 3,
+                         nworker = 1) {
+
+  # 1) tree
+  tr <- phy_tree(physeq, errorIfNULL = FALSE)
+  if (is.null(tr))
+    return(tibble::tibble(Group=gname, pNST=NA_real_, pN_sto=NA_real_, pN_det=NA_real_,
+                          mode = if (abundance_weighted) "phylo/abund" else "phylo/PA",
+                          status="no_tree"))
+
+  # 2) align taxa between mat and tree
+  taxa_in <- intersect(colnames(mat), tr$tip.label)
+  if (length(taxa_in) < 2)
+    return(tibble::tibble(Group=gname, pNST=NA_real_, pN_sto=NA_real_, pN_det=NA_real_,
+                          mode = if (abundance_weighted) "phylo/abund" else "phylo/PA",
+                          status="no_overlap_taxa"))
+
+  mat <- mat[, taxa_in, drop = FALSE]
+  tr  <- ape::keep.tip(tr, taxa_in)
+
+  # 3) drop empty samples
+  mat <- mat[rowSums(mat) > 0, , drop = FALSE]
+  if (nrow(mat) < min_samples || ncol(mat) < 2)
+    return(tibble::tibble(Group=gname, pNST=NA_real_, pN_sto=NA_real_, pN_det=NA_real_,
+                          mode = if (abundance_weighted) "phylo/abund" else "phylo/PA",
+                          status="too_small"))
+
+  # 4) root if needed
+  if (!ape::is.rooted(tr)) tr <- ape::root(tr, outgroup = tr$tip.label[1], resolve.root = TRUE)
+
+  # 5) per‑group working dir to avoid collisions
+  safe <- make.names(gname)                  # sanitize for filesystem
+  wd <- file.path(tempdir(), paste0("pNST_", safe))
+  dir.create(wd, showWarnings = FALSE, recursive = TRUE)
+
+  # 6) tell pNST there is just one group (avoid odd chars)
+  grp <- data.frame(group = factor(rep("all", nrow(mat))), row.names = rownames(mat))
+
+  # 7) run pNST
+  out <- tryCatch(
+    suppressWarnings(
+      NST::pNST(
+        comm               = as.matrix(mat),
+        group              = grp,
+        tree               = tr,
+        abundance.weighted = abundance_weighted,
+        rand               = rand,
+        output.rand        = FALSE,
+        pd.wd              = wd,     # <-- unique per group
+        nworker            = nworker
+      )
+    ),
+    error = function(e) e
+  )
+
+  if (inherits(out, "error") || is.null(out$index.grp) || nrow(out$index.grp) < 1) {
+    return(tibble::tibble(Group=gname, pNST=NA_real_, pN_sto=NA_real_, pN_det=NA_real_,
+                          mode = if (abundance_weighted) "phylo/abund" else "phylo/PA",
+                          status = if (inherits(out, "error")) paste0("error: ", out$message) else "no_result"))
+  }
+
+  idx <- out$index.grp[1, , drop = FALSE]
+
+  tibble::tibble(
+    Group  = gname,
+    pNST   = get_col_by_pattern(idx, c("^NST\\.i", "^NST\\.i\\.(bMNTD|uMNTD)$")),
+    pN_sto = get_col_by_pattern(idx, c("^ST\\.i",  "^ST\\.i\\.(bMNTD|uMNTD)$")),
+    pN_det = get_col_by_pattern(idx, c("^MST\\.i", "^MST\\.i\\.(bMNTD|uMNTD)$")),
+    mode   = if (abundance_weighted) "phylo/abund" else "phylo/PA",
+    status = "ok"
+  )
+}
+
+# Use the SAME phyloseq you used to build otu_list (tree aligned), e.g. physeq_bnti
+ps_for_nst <- physeq_bnti  # or physeq if that’s truly the same taxa set
+
+groups_to_run <- names(otu_list)
+cat("Running pNST (abundance‑weighted) for", length(groups_to_run), "groups...\n")
+
+pnst_rows <- lapply(groups_to_run, function(g) {
+  cat("[pNST] ", g, "\n")
+  run_pNST_one(otu_list[[g]], g, ps_for_nst, rand = 1000, abundance_weighted = TRUE, nworker = 1)
+})
+
+pnst_tab <- dplyr::bind_rows(pnst_rows) |>
+  tidyr::separate(Group, into = c("Soil","Species"), sep = "\\.", remove = FALSE)
+
+# show status counts so you see what happened after the first group
+print(table(pnst_tab$status, useNA = "ifany"))
+
+# fallback to PA mode where needed
+need_pa <- which(!is.finite(pnst_tab$pNST))
+if (length(need_pa) > 0) {
+  cat("\nRe‑running pNST in presence/absence mode for", length(need_pa), "groups that failed...\n")
+  for (i in need_pa) {
+    g <- pnst_tab$Group[i]
+    out_row <- run_pNST_one(otu_list[[g]], g, ps_for_nst, rand = 1000, abundance_weighted = FALSE, nworker = 1)
+    if (is.finite(out_row$pNST)) {
+      pnst_tab[i, c("pNST","pN_sto","pN_det","mode","status")] <- out_row[1, c("pNST","pN_sto","pN_det","mode","status")]
+    } else {
+      pnst_tab$mode[i]   <- out_row$mode
+      pnst_tab$status[i] <- out_row$status
+    }
+  }
+  }
+  
+  print(pnst_tab)
+  write.csv(pnst_tab, paste0(mypath0 , "NST/pNST_bacteria.csv"))
+
+  # --- plot (optional) -------------------------------------------------------
+  
+  ggplot(filter(pnst_tab, status == "ok"),
+         aes(x = Species, y = pNST, fill = Soil)) +
+    geom_col(position = position_dodge(width = 0.75), width = 0.65, color = "black") +
+    geom_hline(yintercept = 0.5, linetype = "dashed") +
+    scale_y_continuous(limits = c(0,1), expand = expansion(mult = c(0, .05))) +
+    scale_fill_manual(values = c("Permissive" = "#D55E00", "resistant" = "#0072B2")) +
+    labs(title = "Phylogenetic NST (βMNTD) by plant family and soil",
+         subtitle = "Abundance-weighted; presence/absence used only for groups that failed",
+         y = "pNST (0 = deterministic, 1 = stochastic)", x = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+library(dplyr)
+library(forcats)
+
+# same cleaning rule you used when building group names
+norm_key <- function(x) gsub("[^A-Za-z0-9]+", "_", as.character(x))
+
+# pull sample_data from the SAME object you used for pNST
+md_df <- as(phyloseq::sample_data(ps_for_nst), "data.frame")
+
+# be robust to column name case
+stopifnot(all(c("species","family") %in% tolower(colnames(md_df))))
+names(md_df) <- tolower(names(md_df))
+
+# build a unique mapping Species -> Family (majority vote if inconsistencies)
+species_map <- md_df %>%
+  mutate(Species_orig = as.character(species),
+         Family       = as.character(family),
+         Species_key  = norm_key(Species_orig)) %>%
+  group_by(Species_key, Species_orig, Family) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  slice_max(n, with_ties = FALSE) %>%      # pick most frequent family per species if needed
+  ungroup() %>%
+  select(Species_key, Species_orig, Family) %>%
+  distinct()
+
+# add key to pnst_tab and join
+pnst_tab2 <- pnst_tab %>%
+  mutate(Species_key = norm_key(Species)) %>%
+  left_join(species_map, by = "Species_key")
+
+# optional sanity check
+# table(is.na(pnst_tab2$Family))
+
+# keep valid rows, order by Family -> Species (original label)
+pnst_tab_ord <- pnst_tab2 %>%
+  filter(status == "ok", !is.na(Family.y)) %>%
+  arrange(Family.y, Species_orig) %>%
+  mutate(Species_orig = fct_inorder(Species_orig))
+
+ggplot(pnst_tab_ord, aes(x = Species_orig, y = pNST, fill = Soil)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65, color = "black") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey50") +
+  scale_y_continuous(limits = c(0,1), expand = expansion(mult = c(0, .05))) +
+  scale_fill_manual(values = c("Permissive" = "#D55E00", "resistant" = "#0072B2")) +
+  labs(title = "Phylogenetic NST (βMNTD) by plant family and soil",
+       subtitle = "Species ordered by family",
+       x = "Plant species (ordered by family)", y = "pNST", fill = "Soil") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+
+
+
+```{r}
+pnst_tab <- bind_rows(pnst_rows) %>%
+  tidyr::separate(Group, into = c("Soil","Species"), sep = "\\.", remove = FALSE)
+# Get sample metadata as data.frame
+library(dplyr)
+
+# Coerce sample metadata safely to data.frame
+md_df <- data.frame(sample_data(physeq))
+
+# Check that the columns exist
+head(md_df$species)
+head(md_df$family)
+
+# Now extract unique species-family mapping
+species_family <- md_df %>%
+  select(Species = species, Family = family) %>%
+  distinct() %>%
+  filter(!is.na(Species), !is.na(Family))
+
+# Join family info to the pNST results
+pnst_tab <- pnst_tab %>%
+  left_join(species_family, by = "Species")
+
+# Order Species by Family (then alphabetically by Species within each Family)
+pnst_tab <- pnst_tab %>%
+  arrange(Family, Species) %>%
+  mutate(Species = factor(Species, levels = unique(Species)))
+ggplot(filter(pnst_tab, status == "ok"),
+       aes(x = Species, y = pNST, fill = Soil)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65, color = "black") +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0, .05))) +
+  scale_fill_manual(values = c("Permissive" = "#D55E00", "resistant" = "#0072B2")) +
+  labs(
+    title = "Phylogenetic NST (βMNTD) by Plant Species and Soil",
+    subtitle = "Abundance-weighted; presence/absence used only for groups that failed",
+    y = "pNST (0 = deterministic, 1 = stochastic)",
+    x = "Plant species (ordered by family)",
+    fill = "Soil"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  )
+
+```
+
+
+
+
+
+#### β-Nearest Taxon Index (βNTI)
+
+
+```{r}
+library(phyloseq)
+# Align OTUs and tree tips
+tr <- phy_tree(physeq)
+if (!is.rooted(tr)) tr <- root(tr, outgroup = tr$tip.label[1], resolve.root = TRUE)
+
+shared_taxa <- intersect(taxa_names(physeq), tr$tip.label)
+physeq_filtered <- prune_taxa(shared_taxa, physeq)
+phy_tree(physeq_filtered) <- keep.tip(tr, shared_taxa)
+```
+
+
+```{r}
+make_otu_list_from_physeq <- function(ps,
+                                      group_vars = c("soil","species"),
+                                      drop_empty_samples = TRUE,
+                                      drop_empty_taxa = TRUE,
+                                      clean_names = TRUE) {
+  stopifnot(inherits(ps, "phyloseq"))
+
+  # 1) metadata – preserve rows/rownames
+  md <- as(phyloseq::sample_data(ps), "data.frame")
+  if (nrow(md) == 0L) stop("sample_data(ps) returned 0 rows; check your phyloseq object.")
+
+  # 2) make sure grouping columns exist
+  miss <- setdiff(group_vars, colnames(md))
+  if (length(miss)) stop("Missing grouping variables in sample_data(): ",
+                         paste(miss, collapse = ", "))
+
+  # 3) build a safe group ID
+  to_chr <- function(x) as.character(x)
+  g1 <- to_chr(md[[group_vars[1]]])
+  g2 <- to_chr(md[[group_vars[2]]])
+
+  if (isTRUE(clean_names)) {
+    # replace spaces and punctuation to make list names safe
+    fix <- function(x) gsub("[^A-Za-z0-9]+", "_", x)
+    g1 <- fix(g1); g2 <- fix(g2)
+  }
+
+  md$Group <- paste(g1, g2, sep = ".")
+
+  # 4) split sample IDs by Group
+  sids <- rownames(md)
+  split_sids <- split(sids, md$Group)
+
+  # 5) build one matrix (samples × taxa) per group
+  mats <- lapply(split_sids, function(ids) {
+    ps_sub <- phyloseq::prune_samples(ids, ps)
+    M <- as(phyloseq::otu_table(ps_sub), "matrix")
+    if (phyloseq::taxa_are_rows(ps_sub)) M <- t(M)
+
+    if (isTRUE(drop_empty_samples) && nrow(M) > 0) {
+      M <- M[rowSums(M) > 0, , drop = FALSE]
+    }
+    if (isTRUE(drop_empty_taxa) && ncol(M) > 0) {
+      M <- M[, colSums(M) > 0, drop = FALSE]
+    }
+    M
+  })
+
+  # 6) keep only non-empty groups (≥1 sample row)
+  mats <- mats[vapply(mats, nrow, 1L) > 0]
+
+  # diagnostics if everything got filtered out
+  if (!length(mats)) warning("All groups were empty after filtering. ",
+                             "Consider setting drop_empty_* = FALSE to inspect.")
+
+  mats
+}
+
+otu_list <- make_otu_list_from_physeq(physeq_filtered,
+                                      group_vars = c("soil","species"),
+                                      drop_empty_samples = TRUE,
+                                      drop_empty_taxa = TRUE)
+
+length(otu_list); head(names(otu_list))
+
+# 2) Prepare tree (root + align with dataset)
+
+tr_all <- phy_tree(physeq_filtered, errorIfNULL = FALSE)
+stopifnot(!is.null(tr_all))
+if (!is.rooted(tr_all)) tr_all <- root(tr_all, outgroup = tr_all$tip.label[1], resolve.root = TRUE)
+
+# keep only taxa shared by OTU table and tree
+shared_taxa <- intersect(taxa_names(physeq_filtered), tr_all$tip.label)
+physeq_bnti <- prune_taxa(shared_taxa, physeq_filtered)
+tr_all      <- keep.tip(tr_all, shared_taxa)
+phy_tree(physeq_bnti) <- tr_all
+
+# 3) βNTI for one group (correct null)
+
+bNTI_one_group <- function(mat, tr,
+                           rand = 999,
+                           abundance_weighted = TRUE,
+                           min_samples = 2,
+                           min_taxa = 3,
+                           eps = 1e-9) {
+  if (is.null(tr)) return(list(summary = tibble(status="no_tree"), bNTI_vals = numeric(0)))
+
+  # taxa for this group
+  taxa_in <- intersect(colnames(mat), tr$tip.label)
+  if (length(taxa_in) < min_taxa)
+    return(list(summary=tibble(status="too_few_taxa", n_samp=nrow(mat), n_tax=length(taxa_in)), bNTI_vals=numeric(0)))
+
+  mat <- mat[, taxa_in, drop = FALSE]
+  mat <- mat[rowSums(mat) > 0, , drop = FALSE]
+  if (nrow(mat) < min_samples)
+    return(list(summary=tibble(status="too_few_samples", n_samp=nrow(mat), n_tax=ncol(mat)), bNTI_vals=numeric(0)))
+
+  # subtree + distances
+  tr_sub <- keep.tip(tr, taxa_in)
+  if (!is.rooted(tr_sub)) tr_sub <- root(tr_sub, outgroup = tr_sub$tip.label[1], resolve.root = TRUE)
+  pdist  <- cophenetic(tr_sub)
+
+  # observed βMNTD
+  bMNTD_obs <- as.matrix(picante::comdistnt(as.matrix(mat), pdist, abundance.weighted = abundance_weighted))
+
+  # null via **tip‑label shuffle on the subtree** (relabel; do NOT reorder)
+  n_samp <- nrow(mat)
+  null_vals <- array(NA_real_, dim = c(n_samp, n_samp, rand))
+  taxa <- colnames(mat)
+  for (r in seq_len(rand)) {
+    tr_perm <- tr_sub
+    tr_perm$tip.label <- sample(tr_perm$tip.label)
+    pdist_null <- cophenetic(tr_perm)
+    null_vals[,,r] <- as.matrix(picante::comdistnt(as.matrix(mat), pdist_null, abundance.weighted = abundance_weighted))
+  }
+
+  m_null <- apply(null_vals, c(1,2), mean, na.rm = TRUE)
+  s_null <- apply(null_vals, c(1,2), sd,   na.rm = TRUE)
+  s_null[!is.finite(s_null) | s_null == 0] <- eps
+
+  bNTI_mat <- (bMNTD_obs - m_null) / s_null
+  diag(bNTI_mat) <- NA_real_
+
+  vals <- bNTI_mat[upper.tri(bNTI_mat)]
+  vals <- vals[is.finite(vals)]
+  if (!length(vals)) return(list(summary=tibble(status="no_pairs"), bNTI_vals=numeric(0)))
+
+  summary <- tibble(
+    status       = "ok",
+    mode         = if (abundance_weighted) "phylo/abund" else "phylo/PA",
+    pairs        = length(vals),
+    mean_bNTI    = mean(vals),
+    frac_var_sel = mean(vals >  2),
+    frac_hom_sel = mean(vals < -2),
+    frac_stoch   = mean(vals >= -2 & vals <= 2)
+  )
+  list(summary = summary, bNTI_vals = vals)
+}
+
+```
+
+
+
+
+
+
+
+## 3.1.2. Differential microbial enrichment by co-cultivated weed species
+
+
+### metagenomeSeq
+```{r - metagenomeSeq}
+library(metagenomeSeq)
+# https://www.bioconductor.org/packages/release/bioc/html/metagenomeSeq.html
+physeq_log2fold <- subset_samples(physeq, soil == "resistant")  # Adjust to "Permissive" or "resistant" 
+#physeq_log2fold <- physeq_soilB # physeq_soilA; physeq_soilB
+
+# Ensure "species" is a factor in the metadata
+sample_data(physeq_log2fold)$species <- as.factor(sample_data(physeq_log2fold)$species)
+physeq_log2fold_filtered <- filter_taxa(physeq_log2fold, function(x) sum(x > 0) >= 5, TRUE)
+MRobj <- phyloseq_to_metagenomeSeq(physeq_log2fold_filtered) # MRexperiment object
+# Unlike DESeq2, which uses a geometric mean-based normalization, CSS accounts for sparsity by calculating a cumulative sum percentile cutoff.
+MRobj <- cumNorm(MRobj)  # Perform Cumulative Sum Scaling (CSS) normalization
+#MRobj <- wrenchNorm(MRobj, condition = metadata$species)  # Instead of cumNorm
+MRobj <- filterData(MRobj, present = 0.05, depth = 5)
+normalized_counts <- MRcounts(MRobj, norm = TRUE)  # Extract CSS-normalized counts
+
+metadata <- data.frame(sample_data(physeq_log2fold_filtered))  # Extract metadata
+metadata <- metadata[colnames(normalized_counts), ]  # Align metadata with normalized counts
+metadata$species <- as.factor(metadata$species)
+metadata$species <- relevel(metadata$species, ref = "wheat x wheat")
+
+
+# Recreate the model matrix with "wheat alone" as the reference
+mod <- model.matrix(~ species, data = metadata)
+settings <- zigControl(maxit = 50, verbose = TRUE)
+fit <- fitZig(obj = MRobj, mod = mod, useCSSoffset = TRUE, control = settings)
+#fit <- fitLogNormal(obj = MRobj, mod = mod, B = 1000)
+global_results <- MRcoefs(fit)
+
+# Get all unique species
+species_list <- levels(metadata$species)
+wheat_species <- "wheat x wheat"  # Reference group
+pairwise_results <- list()  # Store results
+
+for (sp in species_list) {
+  if (sp != wheat_species) {
+    # Extract results for each pairwise comparison
+    res <- MRcoefs(fit, coef = paste0("species", sp), adjustMethod = "bonferroni", alpha = 0.05, number = dim(normalized_counts)[1])
+    sig_results <- res[res$adjPvalues < 0.05, ]  # Adjusted p-value threshold
+    pairwise_results[[sp]] <- sig_results
+    print(paste("comparison:", wheat_species, "vs", sp, dim(sig_results)[1]))
+  }
+}
+# Convert results to a single DataFrame
+pairwise_results_df <- do.call(rbind, pairwise_results)
+
+this_path <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+
+output_dir <- file.path(this_path, "metagenomeSeq_species")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+write.csv(pairwise_results_df, file = file.path(output_dir, "MetaSeq_bacteria_Resistant_CSS_wheat_x_wheat.csv"), row.names = TRUE)
+```
+
+```{r - metagenomeSeq}
+library(metagenomeSeq)
+# https://www.bioconductor.org/packages/release/bioc/html/metagenomeSeq.html
+physeq_log2fold <- subset_samples(physeq, soil == "resistant")  # Adjust to "Permissive" or "resistant" 
+#physeq_log2fold <- physeq_soilB # physeq_soilA; physeq_soilB
+
+# Ensure "species" is a factor in the metadata
+sample_data(physeq_log2fold)$species <- as.factor(sample_data(physeq_log2fold)$species)
+physeq_log2fold_filtered <- filter_taxa(physeq_log2fold, function(x) sum(x > 0) >= 5, TRUE)
+MRobj <- phyloseq_to_metagenomeSeq(physeq_log2fold_filtered) # MRexperiment object
+# Unlike DESeq2, which uses a geometric mean-based normalization, CSS accounts for sparsity by calculating a cumulative sum percentile cutoff.
+MRobj <- cumNorm(MRobj)  # Perform Cumulative Sum Scaling (CSS) normalization
+#MRobj <- wrenchNorm(MRobj, condition = metadata$species)  # Instead of cumNorm
+MRobj <- filterData(MRobj, present = 0.05, depth = 5)
+normalized_counts <- MRcounts(MRobj, norm = TRUE)  # Extract CSS-normalized counts
+
+metadata <- data.frame(sample_data(physeq_log2fold_filtered))  # Extract metadata
+metadata <- metadata[colnames(normalized_counts), ]  # Align metadata with normalized counts
+metadata$species <- as.factor(metadata$species)
+metadata$species <- relevel(metadata$species, ref = "wheat alone")
+
+
+# Recreate the model matrix with "wheat alone" as the reference
+mod <- model.matrix(~ species, data = metadata)
+settings <- zigControl(maxit = 50, verbose = TRUE)
+fit <- fitZig(obj = MRobj, mod = mod, useCSSoffset = TRUE, control = settings)
+#fit <- fitLogNormal(obj = MRobj, mod = mod, B = 1000)
+global_results <- MRcoefs(fit)
+
+# Get all unique species
+species_list <- levels(metadata$species)
+wheat_species <- "wheat alone"  # Reference group
+pairwise_results <- list()  # Store results
+
+for (sp in species_list) {
+  if (sp != wheat_species) {
+    # Extract results for each pairwise comparison
+    res <- MRcoefs(fit, coef = paste0("species", sp), adjustMethod = "bonferroni", alpha = 0.05, number = dim(normalized_counts)[1])
+    sig_results <- res[res$adjPvalues < 0.05, ]  # Adjusted p-value threshold
+    pairwise_results[[sp]] <- sig_results
+    print(paste("comparison:", wheat_species, "vs", sp, dim(sig_results)[1]))
+  }
+}
+# Convert results to a single DataFrame
+pairwise_results_df <- do.call(rbind, pairwise_results)
+
+this_path <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+
+output_dir <- file.path(this_path, "metagenomeSeq_species")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+write.csv(pairwise_results_df, file = file.path(output_dir, "MetaSeq_fungi_Resistant_CSS_wheat_alone.csv"), row.names = TRUE)
+```
+
+
+
+
+```{r - metagenomeSeq - wheat control}
+library(metagenomeSeq)
+# https://www.bioconductor.org/packages/release/bioc/html/metagenomeSeq.html
+physeq_log2fold <- subset_samples(physeq, soil == "resistant") # resistant, Permissive
+# physeq_log2fold <- physeq_soilA
+
+physeq_log2fold_filtered <- filter_taxa(physeq_log2fold, function(x) sum(x > 0) >= 5, TRUE)
+
+
+MRobj <- phyloseq_to_metagenomeSeq(physeq_log2fold_filtered) # MRexperiment object
+# Unlike DESeq2, which uses a geometric mean-based normalization, CSS accounts for sparsity by calculating a cumulative sum percentile cutoff.
+MRobj <- cumNorm(MRobj)  # Perform Cumulative Sum Scaling (CSS) normalization
+#MRobj <- wrenchNorm(MRobj, condition = metadata$species)  # Instead of cumNorm
+MRobj <- filterData(MRobj, present = 0.05, depth = 5)
+normalized_counts <- MRcounts(MRobj, norm = TRUE)  # Extract CSS-normalized counts
+
+metadata <- data.frame(sample_data(physeq_log2fold_filtered))  # Extract metadata
+metadata <- metadata[colnames(normalized_counts), ]  # Align metadata with normalized counts
+metadata$Controls <- ifelse(metadata$species %in% c("wheat alone", "wheat x wheat"), 
+                                "Controls", metadata$species)
+# sample_data(physeq_log2fold)$Controls <- as.factor(sample_data(physeq_log2fold)$Controls)
+metadata$Controls <- relevel(factor(metadata$Controls), ref = "Controls")
+
+# Recreate the model matrix with "wheat alone" as the reference
+mod <- model.matrix(~ Controls, data = metadata)
+settings <- zigControl(maxit = 50, verbose = TRUE)
+fit <- fitZig(obj = MRobj, mod = mod, useCSSoffset = TRUE, control = settings)
+#fit <- fitLogNormal(obj = MRobj, mod = mod, B = 1000)
+global_results <- MRcoefs(fit)
+
+# Get all unique species
+species_list <- levels(metadata$Controls)
+wheat_species <- "Controls"  # Reference group
+pairwise_results <- list()  # Store results
+
+for (sp in species_list) {
+  if (sp != wheat_species) {
+    # Extract results for each pairwise comparison
+    res <- MRcoefs(fit, coef = paste0("Controls", sp), adjustMethod = "bonferroni", alpha = 0.05, number = dim(normalized_counts)[1])
+    sig_results <- res[res$adjPvalues < 0.05, ]  # Adjusted p-value threshold
+    pairwise_results[[sp]] <- sig_results
+    print(paste("comparison:", wheat_species, "vs", sp, dim(sig_results)[1]))
+  }
+}
+# Convert results to a single DataFrame
+pairwise_results_df <- do.call(rbind, pairwise_results)
+
+this_path <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+
+output_dir <- file.path(this_path, "metagenomeSeq_species")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+write.csv(pairwise_results_df, file = file.path(output_dir, "MetaSeq_fungi_Resistant_CSS_wheats.csv"), row.names = TRUE)
+```
+
+
+
+
+
+### DESeq2
+species_list <- levels(metadata$species)
+
+
+```{r}
+library(DESeq2)
+species <- "wheat x wheat"
+wheat_species <- species
+
+physeq_log2fold <- subset_samples(physeq, soil == "resistant")
+# physeq_log2fold <- physeq_soilB  # Adjust to "Permissive" or "resistant" 
+
+metadata <- as.data.frame(sample_data(physeq_log2fold))
+metadata$species <- factor(metadata$species)
+
+diagdds <- phyloseq_to_deseq2(physeq_log2fold, ~ species)
+diagdds <- estimateSizeFactors(diagdds, type = "poscounts")
+diagdds <- DESeq(diagdds, test = "Wald", fitType = "parametric")
+
+species_list <- levels(metadata$species)
+all_sig_results <- data.frame()
+
+for (sp in species_list) {
+  if (sp != wheat_species) {
+    res <- results(diagdds, contrast = c("species", wheat_species, sp))
+    sig_res <- res[which(res$padj < 0.05), ]
+    #sig_res <- res[which(res$pvalue < 0.05), ]
+    if (nrow(sig_res) > 0) {
+      sig_res_df <- as.data.frame(sig_res)
+      sig_res_df$taxa <- rownames(sig_res_df)
+      sig_res_df$comparison <- paste(wheat_species, "vs", sp)
+      all_sig_results <- rbind(all_sig_results, sig_res_df)
+    }
+    
+    cat("Completed comparison:", wheat_species, "vs", sp, "\n")
+  }
+}
+
+# Save output
+this_path <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+output_dir <- file.path(this_path, "DESeq2_species")
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+write.csv(all_sig_results, file.path(output_dir, "DESeq_bacteria_Resistant_species_vs_wheat_x_wheat_padj.csv"), row.names = TRUE)
+```
+
+
+
+
+
+
+
+```{r}
+library(DESeq2)
+species <- "wheat alone"
+wheat_species <- species
+
+physeq_log2fold <- subset_samples(physeq, soil == "resistant")
+# physeq_log2fold <- physeq_soilB  # Adjust to "Permissive" or "resistant" 
+
+metadata <- as.data.frame(sample_data(physeq_log2fold))
+metadata$species <- factor(metadata$species)
+
+diagdds <- phyloseq_to_deseq2(physeq_log2fold, ~ species)
+diagdds <- estimateSizeFactors(diagdds, type = "poscounts")
+diagdds <- DESeq(diagdds, test = "Wald", fitType = "parametric")
+
+species_list <- levels(metadata$species)
+all_sig_results <- data.frame()
+
+for (sp in species_list) {
+  if (sp != wheat_species) {
+    res <- results(diagdds, contrast = c("species", wheat_species, sp))
+    sig_res <- res[which(res$padj < 0.05), ]
+    #sig_res <- res[which(res$pvalue < 0.05), ]
+    if (nrow(sig_res) > 0) {
+      sig_res_df <- as.data.frame(sig_res)
+      sig_res_df$taxa <- rownames(sig_res_df)
+      sig_res_df$comparison <- paste(wheat_species, "vs", sp)
+      all_sig_results <- rbind(all_sig_results, sig_res_df)
+    }
+    
+    cat("Completed comparison:", wheat_species, "vs", sp, "\n")
+  }
+}
+
+# Save output
+this_path <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+output_dir <- file.path(this_path, "DESeq2_species")
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+write.csv(all_sig_results, file.path(output_dir, "DESeq_fungi_Resistant_species_vs_wheat_alone_padj.csv"), row.names = TRUE)
+```
+
+
+
+
+
+
+```{r - deseq2 microbiome - all wheat as controls}
+# https://joey711.github.io/phyloseq-extensions/DESeq2.html 
+wheat_species = "Controls"
+
+# physeq_log2fold <- subset_samples(physeq, soil == "Permissive")  # Adjust to "Permissive" or "resistant" 
+physeq_log2fold <- subset_samples(physeq, soil == "Permissive")
+
+# Extract the sample data
+metadata <- as.data.frame(sample_data(physeq_log2fold))
+# Create the new "Controls" column based on "species"
+# metadata_tmp$Controls <- ifelse(metadata_tmp$species %in% c("wheat alone", "wheat x wheat"), "control", "test")
+metadata$Controls <- ifelse(metadata$species %in% c("wheat alone", "wheat x wheat"), 
+                                "Controls", metadata$species)
+# Assign the modified metadata back to the phyloseq object
+sample_data(physeq_log2fold) <- sample_data(metadata)
+# head(sample_data(physeq_log2fold)$Controls, 225)
+count_data = as.data.frame(round(as.matrix(otu_table(physeq_log2fold)))) # force to be a df
+
+# Create DESeq2 object
+diagdds <- DESeqDataSetFromMatrix(
+  countData = count_data,
+  colData = metadata,
+  design = ~ Controls  # Update design to use "species"
+)
+diagdds <- phyloseq_to_deseq2(physeq_log2fold, ~ Controls) # Controls; species
+# Wald Uses Raw Counts but Needs Normalization for Library Size Differences
+diagdds <- estimateSizeFactors(diagdds, type = "poscounts")  # Robust for sparse data
+diagdds <- DESeq(diagdds, test="Wald", fitType="parametric")
+
+
+metadata$Controls <- as.factor(metadata$Controls)
+species_list <- levels(metadata$Controls)
+all_sig_results <- data.frame()  # To store significant results
+
+for (sp in species_list) {
+  if (sp != wheat_species) {
+    # Comparison: wheat_species vs sp
+    res1 <- results(diagdds, contrast = c("Controls", wheat_species, sp))
+    # sig_res1 <- res1[which(res1$padj < 0.05), ]
+    sig_res1 <- res1[which(res1$pvalue < 0.05), ]
+
+    # Comparison: sp vs wheat_species
+    res2 <- results(diagdds, contrast = c("Controls", sp, wheat_species))
+    # sig_res2 <- res2[which(res2$padj < 0.05), ]
+    sig_res2 <- res2[which(res2$pvalue < 0.05), ]
+    # Combine significant results for both directions
+    if (nrow(sig_res1) > 0) {
+      sig_res1_df <- as.data.frame(sig_res1)
+      sig_res1_df$taxa <- rownames(sig_res1_df)
+      sig_res1_df$comparison <- paste(wheat_species, "vs", sp)
+      all_sig_results <- rbind(all_sig_results, sig_res1_df)
+    }
+    
+    if (nrow(sig_res2) > 0) {
+      sig_res2_df <- as.data.frame(sig_res2)
+      sig_res2_df$taxa <- rownames(sig_res2_df)
+      sig_res2_df$comparison <- paste(sp, "vs", wheat_species)
+      all_sig_results <- rbind(all_sig_results, sig_res2_df)
+    }
+    
+    # Print progress
+    cat("Completed comparisons for:", wheat_species, "vs", sp, "\n")
+  }
+}
+
+# Step 8: View and save results
+# View the top significant results
+head(all_sig_results)
+
+
+
+this_path <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+output_dir <- file.path(this_path, "DESeq2_species")
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+write.csv(all_sig_results, file.path(output_dir, "DESeq_fungi_Permissive_species_vs_wheats_padj.csv"), row.names = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+### EdgeR
+
+
+```{r - edgeR}
+library(edgeR)
+# Subset phyloseq data for resistant soil
+physeq_log2fold <- subset_samples(physeq, soil == "Permissive") # resistant; Permissive
+# physeq_log2fold <- physeq_soilA
+
+# Extract sample metadata
+metadata <- data.frame(sample_data(physeq_log2fold))
+metadata$species <- factor(metadata$species)
+# Ensure "wheat alone" is the reference level
+metadata$species <- relevel(metadata$species, ref = "wheat x wheat")
+# Convert OTU table to count data
+physeq_log2fold_filtered <- filter_taxa(physeq_log2fold, function(x) sum(x > 0) >= 5, TRUE)
+count_data <- as.data.frame(round(as.matrix(otu_table(physeq_log2fold_filtered))))
+# Create DGEList object
+dge <- DGEList(counts = count_data, group = metadata$species)
+# Normalize with TMM
+dge <- calcNormFactors(dge, method = "TMM")
+# Create a design matrix with species as a factor
+design <- model.matrix(~0 + species, data = metadata)  # Use 'species' explicitly
+colnames(design) <- gsub("species", "", colnames(design))  # Clean column names
+# Estimate dispersion
+dge <- estimateDisp(dge, design)
+# Fit the model
+fit <- glmQLFit(dge, design)
+
+# Get list of species, excluding control
+# species_list <- setdiff(levels(metadata$species), "wheat x wheat")
+control_species <- "wheat x wheat"
+# Initialize results storage
+all_sig_results <- data.frame()
+
+colnames(design) <- make.names(colnames(design))  # Fix invalid column names
+species_list <- make.names(species_list)          # Fix species names
+control_species <- make.names("wheat x wheat")      # Fix control name
+
+# Loop through each species for comparisons
+for (sp in species_list) {
+  if (sp != control_species) {
+    # Create contrast correctly
+    contrast_matrix <- makeContrasts(contrasts = paste0(sp, " - ", control_species), levels = design)
+    # Run differential expression test
+    result <- glmQLFTest(fit, contrast = contrast_matrix)
+    # Extract significant results (FDR < 0.05)
+    sig_res <- topTags(result, n = Inf)$table
+    sig_res <- sig_res[sig_res$PValue < 0.05, ]  # Using raw p-value instead of FDR
+    # sig_res <- sig_res[sig_res$FDR < 0.05, ]  # Using FDR filtering
+    if (nrow(sig_res) > 0) {
+      sig_res_df <- as.data.frame(sig_res)
+      sig_res_df$taxa <- rownames(sig_res_df)
+      sig_res_df$comparison <- paste(control_species, "vs", sp)
+      all_sig_results <- rbind(all_sig_results, sig_res_df)
+    }
+    cat("Completed comparisons for:", control_species, "vs", sp, "\n")
+  }
+}
+# View top significant results
+head(all_sig_results)
+all_sig_results$comparison <- gsub("Capsella\\.bursa\\.pastoris", "Capsella.bursa-pastoris", all_sig_results$comparison)
+all_sig_results$comparison <- gsub("Legousia\\.speculum\\.veneris", "Legousia.speculum-veneris", all_sig_results$comparison)
+all_sig_results$comparison <- gsub("Trigonella\\.foenum\\.graecum", "Trigonella.foenum-graecum", all_sig_results$comparison)
+
+this_path <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+output_dir <- file.path(this_path, "edgeR_species")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+# Save results to CSV
+write.csv(all_sig_results, file = file.path(output_dir, "edgeR_bacteria_Permissive_vs_wheat_x_wheat.csv"), row.names = TRUE)
+```
+
+
+
+
+
+```{r - edgeR}
+library(edgeR)
+# Subset phyloseq data for resistant soil
+physeq_log2fold <- subset_samples(physeq, soil == "resistant") # resistant; Permissive
+# physeq_log2fold <- physeq_soilA
+
+# Extract sample metadata
+metadata <- data.frame(sample_data(physeq_log2fold))
+metadata$species <- factor(metadata$species)
+# Ensure "wheat alone" is the reference level
+metadata$species <- relevel(metadata$species, ref = "wheat alone")
+# Convert OTU table to count data
+physeq_log2fold_filtered <- filter_taxa(physeq_log2fold, function(x) sum(x > 0) >= 5, TRUE)
+count_data <- as.data.frame(round(as.matrix(otu_table(physeq_log2fold_filtered))))
+# Create DGEList object
+dge <- DGEList(counts = count_data, group = metadata$species)
+# Normalize with TMM
+dge <- calcNormFactors(dge, method = "TMM")
+# Create a design matrix with species as a factor
+design <- model.matrix(~0 + species, data = metadata)  # Use 'species' explicitly
+colnames(design) <- gsub("species", "", colnames(design))  # Clean column names
+# Estimate dispersion
+dge <- estimateDisp(dge, design)
+# Fit the model
+fit <- glmQLFit(dge, design)
+
+# Get list of species, excluding control
+# species_list <- setdiff(levels(metadata$species), "wheat x wheat")
+control_species <- "wheat alone"
+# Initialize results storage
+all_sig_results <- data.frame()
+
+colnames(design) <- make.names(colnames(design))  # Fix invalid column names
+species_list <- make.names(species_list)          # Fix species names
+control_species <- make.names("wheat alone")      # Fix control name
+
+# Loop through each species for comparisons
+for (sp in species_list) {
+  if (sp != control_species) {
+    # Create contrast correctly
+    contrast_matrix <- makeContrasts(contrasts = paste0(sp, " - ", control_species), levels = design)
+    # Run differential expression test
+    result <- glmQLFTest(fit, contrast = contrast_matrix)
+    # Extract significant results (FDR < 0.05)
+    sig_res <- topTags(result, n = Inf)$table
+    sig_res <- sig_res[sig_res$PValue < 0.05, ]  # Using raw p-value instead of FDR
+    # sig_res <- sig_res[sig_res$FDR < 0.05, ]  # Using FDR filtering
+    if (nrow(sig_res) > 0) {
+      sig_res_df <- as.data.frame(sig_res)
+      sig_res_df$taxa <- rownames(sig_res_df)
+      sig_res_df$comparison <- paste(control_species, "vs", sp)
+      all_sig_results <- rbind(all_sig_results, sig_res_df)
+    }
+    cat("Completed comparisons for:", control_species, "vs", sp, "\n")
+  }
+}
+# View top significant results
+head(all_sig_results)
+all_sig_results$comparison <- gsub("Capsella\\.bursa\\.pastoris", "Capsella.bursa-pastoris", all_sig_results$comparison)
+all_sig_results$comparison <- gsub("Legousia\\.speculum\\.veneris", "Legousia.speculum-veneris", all_sig_results$comparison)
+all_sig_results$comparison <- gsub("Trigonella\\.foenum\\.graecum", "Trigonella.foenum-graecum", all_sig_results$comparison)
+
+this_path <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+output_dir <- file.path(this_path, "edgeR_species")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+# Save results to CSV
+write.csv(all_sig_results, file = file.path(output_dir, "edgeR_fungi_Resistant_vs_wheat_alone.csv"), row.names = TRUE)
+```
+
+
+
+
+
+```{r - edge - all wheat as controls}
+library(edgeR)
+# Subset phyloseq data for resistant soil
+physeq_log2fold <- subset_samples(physeq, soil == "Permissive") # resistant; Permissive
+# physeq_log2fold <- physeq_soilB
+
+# Extract metadata
+metadata <- data.frame(sample_data(physeq_log2fold))
+# Define "control" group based on species
+metadata$Controls <- ifelse(metadata$species %in% c("wheat alone", "wheat x wheat"), "Controls", metadata$species)
+# Ensure Controls is a factor and set "control" as the reference level
+metadata$Controls <- relevel(factor(metadata$Controls), ref = "Controls")
+# Convert OTU table to count data
+physeq_log2fold_filtered <- filter_taxa(physeq_log2fold, function(x) sum(x > 0) >= 5, TRUE)
+count_data <- as.data.frame(round(as.matrix(otu_table(physeq_log2fold_filtered))))
+# Create DGEList object
+dge <- DGEList(counts = count_data, group = metadata$Controls)
+# Normalize with TMM
+dge <- calcNormFactors(dge, method = "TMM")
+# Create a design matrix with Controls as a factor
+design <- model.matrix(~0 + Controls, data = metadata)
+colnames(design) <- make.names(colnames(design))  # Fix invalid column names
+# Estimate dispersion
+dge <- estimateDisp(dge, design)
+# Fit the model
+fit <- glmQLFit(dge, design)
+# Get list of species (excluding control)
+species_list <- setdiff(levels(metadata$Controls), "Controls")
+control_species <- "Controls"
+
+
+# Initialize results storage
+all_sig_results <- data.frame()
+# Convert species names to valid R variable names
+species_list <- make.names(species_list)
+control_species <- make.names(control_species)
+# Loop through each species for individual pairwise comparisons
+for (sp in species_list) {
+  if (sp != control_species) {
+    contrast_sp <- paste0("Controls", sp)
+    contrast_control <- paste0("Controls", control_species)
+    # Create contrast for direct species vs control comparison
+    contrast_matrix <- makeContrasts(contrasts = paste0(contrast_sp, " - ", contrast_control), levels = design)
+
+    # Run differential expression test
+    result <- glmQLFTest(fit, contrast = contrast_matrix)
+
+    # Extract significant results (FDR < 0.05)
+    sig_res <- topTags(result, n = Inf)$table
+    #sig_res <- sig_res[sig_res$FDR < 0.05, ]  # Using FDR filtering
+    sig_res <- sig_res[sig_res$PValue < 0.05, ]  # Using FDR filtering
+
+    if (nrow(sig_res) > 0) {
+      sig_res_df <- as.data.frame(sig_res)
+      sig_res_df$taxa <- rownames(sig_res_df)
+      sig_res_df$comparison <- paste(control_species, "vs", sp)
+      all_sig_results <- rbind(all_sig_results, sig_res_df)
+    }
+    
+    cat("Completed comparisons for:", control_species, "vs", sp, "\n")
+  }
+}
+
+# View top significant results
+head(all_sig_results)
+
+all_sig_results$comparison <- gsub("Capsella\\.bursa\\.pastoris", "Capsella.bursa-pastoris", all_sig_results$comparison)
+all_sig_results$comparison <- gsub("Legousia\\.speculum\\.veneris", "Legousia.speculum-veneris", all_sig_results$comparison)
+all_sig_results$comparison <- gsub("Trigonella\\.foenum\\.graecum", "Trigonella.foenum-graecum", all_sig_results$comparison)
+
+this_path <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+output_dir <- file.path(this_path, "edgeR_species")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+# Save results to CSV
+write.csv(all_sig_results, file = file.path(output_dir, "edgeR_fungi_Permissive_vs_wheats.csv"), row.names = TRUE)
+
+```
+
+
+
+
+
+
+# 3.2. Wheat biomass response to neighbouring plant species
+
+## 3.2.2. Microbial indicators of wheat performance
+
+### mEQO
+
+Ensemble Quotient Optimization for microbiome (mEQO) 
+Shan (2023). - https://github.com/Xiaoyu2425/mEQO
+
+
+Component
+Use in Python
+eqo_result$members Compare with GF/TITAN; taxon-level overlap
+eqo_result$abundance Correlate with wheat biomass; visualize per treatment
+dry_mass_clean Anchor variable for module evaluation
+
+
+```{r}
+mypath_res <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+
+otumat <- read.table(file = file.path(mypath, "matrice_phase1/df/otu_bacteria_table_R_1282ASVs.csv"), h=T, row.names = 1,sep="\t")
+
+otumat_A <- otumat[, grepl("^A", colnames(otumat))]
+threshold <- 100
+# Subset otumat_A to keep only rows where the sum of the row is greater than or equal to the threshold
+otumat_A_filtered <- otumat_A[rowSums(otumat_A) >= threshold, ]
+
+otumat_B <- otumat[, grepl("^B", colnames(otumat))]
+threshold <- 100
+# Subset otumat_A to keep only rows where the sum of the row is greater than or equal to the threshold
+otumat_B_filtered <- otumat_B[rowSums(otumat_B) >= threshold, ]
+```
+
+
+
+```{r}
+# Load required libraries
+library(mEQO)
+library(dplyr)
+
+# ---- Step 1: Prepare data ----
+# Assuming you already have these in your workspace
+# otu_table: taxa x samples (rownames = taxa IDs, colnames = sample IDs)
+# metadata: samples x variables (rownames = sample IDs)
+normalize_names <- function(x) {
+  gsub("[._]", "-", x)  # Converts both dots and underscores to dashes
+}
+colnames(otumat_B_filtered) <- normalize_names(colnames(otumat_B_filtered))
+taxa_totals <- rowSums(otumat_B_filtered)
+filtered_otu_table <- otumat_B_filtered[taxa_totals >= 100, ]
+
+# Make sure samples match
+# common_samples <- intersect(colnames(filtered_otu_table), rownames(metadata_all))
+common_samples <- intersect(colnames(filtered_otu_table), metadata_all$sample)
+
+otu_table <- filtered_otu_table[, common_samples]
+# metadata <- metadata_all[common_samples, ]
+metadata <- metadata_all %>%
+  filter(sample %in% common_samples)
+
+otu_for_eqo <- t(otu_table)  # now samples x taxa
+dry_mass <- metadata$Dry_wheat_mass
+valid_samples <- !is.na(dry_mass)
+# Step 2: Subset both matrices
+otu_for_eqo_clean <- otu_for_eqo[valid_samples, ]
+dry_mass_clean <- dry_mass[valid_samples]
+dim(otu_for_eqo_clean)
+
+
+# Step 3: Run EQO
+set.seed(42)
+# eqo_result_bls_Nmax5 <- EQO_bls(M = ≈, y = dry_mass_clean, Nmax = 5)
+eqo_result_soilA <-  EQO_ga("c",otu_for_eqo_clean,dry_mass_clean,maxIter=100)
+
+eqo_result_soilB <-  EQO_ga("c",otu_for_eqo_clean,dry_mass_clean,maxIter=100) 
+# eqo_result_soilB <- eqo_result
+# can<-CAN("ga_c",otu_for_eqo_clean,dry_mass_clean,maxIter=100,tm=10)  
+
+
+# ---- Step 4: View and analyze results ----
+# Coefficients for each module
+# Define your base path
+dir.create(file.path(mypath_res, "mEQO"), showWarnings = FALSE)
+# Save selected taxa
+write.csv(rownames(otu_for_eqo_clean),
+          file = file.path(mypath_res, "mEQO", "sample_names_soilB_taxa_bacteria.csv"),
+          row.names = FALSE)
+write.csv(eqo_result_soilA$members,
+          file = file.path(mypath_res, "mEQO", "eqo_selected_soilA_taxa_bacteria.csv"),
+          row.names = FALSE)
+write.csv(eqo_result_soilB$members,
+          file = file.path(mypath_res, "mEQO", "eqo_selected_soilB_taxa_bacteria.csv"),
+          row.names = FALSE)
+# Save abundance of the selected module (vector with 1 value per sample)
+write.csv(eqo_result_soilA$abundance,
+          file = file.path(mypath_res, "mEQO", "eqo_module_soilA_abundance_bacteria.csv"),
+          row.names = TRUE)
+write.csv(eqo_result_soilB$abundance,
+          file = file.path(mypath_res, "mEQO", "eqo_module_soilB_abundance_bacteria.csv"),
+          row.names = TRUE)
+          
+# Save biomass vector if not already exported
+write.csv(dry_mass_clean,
+          file = file.path(mypath_res, "mEQO", "dry_mass_soilB_bacteria.csv"),
+          row.names = TRUE)
+
+# Taxon group assignments
+head(eqo_result$groups)
+
+# ---- Optional: Add cluster annotations back to your taxon table ----
+taxon_groups <- data.frame(Taxon = rownames(otu_table),
+                           EQO_Cluster = eqo_result$groups)
+
+# ---- Step 5: Visualization (optional) ----
+library(ggplot2)
+# Summarize abundance of each EQO cluster per sample
+otu_with_groups <- otu_table
+otu_with_groups$EQO_Cluster <- eqo_result$groups
+
+cluster_abund <- otu_with_groups %>%
+  group_by(EQO_Cluster) %>%
+  summarise(across(where(is.numeric), sum)) %>%
+  column_to_rownames("EQO_Cluster") %>%
+  t() %>%
+  as.data.frame()
+
+cluster_abund$Dry_Wheat_Mass <- dry_mass
+
+# Plot example: abundance of each cluster vs Dry Wheat Mass
+cluster_abund_long <- cluster_abund %>%
+  mutate(Sample = rownames(.)) %>%
+  pivot_longer(cols = starts_with("X"), names_to = "Cluster", values_to = "Abundance")
+
+ggplot(cluster_abund_long, aes(x = Dry_Wheat_Mass, y = Abundance, color = Cluster)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_minimal() +
+  labs(title = "EQO Cluster Abundance vs Dry Wheat Mass",
+       x = "Dry Wheat Mass", y = "Cluster Abundance")
+```
+
+effect size
+
+
+```{r}
+# ---- Setup ----
+library(dplyr)
+library(tidyr)
+
+mypath_res <- '/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/'
+
+# ---- Function that matches by position (order) not rownames ----
+analyze_module_biomass_byorder <- function(module_file, mass_file, label) {
+  
+  cat("\n", rep("-", 60), "\n", sep = "")
+  cat("ANALYZING:", label, "\n")
+  cat(rep("-", 60), "\n", sep = "")
+  
+  # Load files
+  mod_df <- read.csv(module_file, row.names = 1)
+  mass_df <- read.csv(mass_file, row.names = 1)
+  
+  # Extract vectors (assuming they're in the same order)
+  abundance_vec <- mod_df[, 1]
+  biomass_vec <- mass_df[, 1]
+  
+  # Check if lengths match
+  if(length(abundance_vec) != length(biomass_vec)) {
+    cat("ERROR: Different number of samples!\n")
+    cat("  Module abundance: n =", length(abundance_vec), "\n")
+    cat("  Dry mass: n =", length(biomass_vec), "\n")
+    return(NULL)
+  }
+  
+  # Get sample names from module file (these are the real sample IDs)
+  sample_names <- rownames(mod_df)
+  
+  # Remove NAs
+  valid_idx <- !is.na(abundance_vec) & !is.na(biomass_vec) & 
+               is.finite(abundance_vec) & is.finite(biomass_vec)
+  
+  abundance_clean <- abundance_vec[valid_idx]
+  biomass_clean <- biomass_vec[valid_idx]
+  sample_names_clean <- sample_names[valid_idx]
+  
+  n_samples <- length(biomass_clean)
+  
+  cat("  Total samples:", length(abundance_vec), "\n")
+  cat("  Valid samples after NA removal:", n_samples, "\n")
+  
+  if(n_samples < 3) {
+    cat("ERROR: Not enough valid samples (n =", n_samples, ")\n")
+    return(NULL)
+  }
+  
+  # Check variance
+  if(sd(abundance_clean) == 0 | sd(biomass_clean) == 0) {
+    cat("ERROR: No variance in data\n")
+    return(NULL)
+  }
+  
+  # Spearman correlation
+  cor_test <- cor.test(abundance_clean, biomass_clean, method = "spearman", exact = FALSE)
+  rho <- as.numeric(cor_test$estimate)
+  p_value <- cor_test$p.value
+  
+  # Linear model for R²
+  lm_fit <- lm(biomass_clean ~ abundance_clean)
+  r_squared <- summary(lm_fit)$r.squared
+  adj_r_squared <- summary(lm_fit)$adj.r.squared
+  
+  # Pearson correlation
+  pearson_test <- cor.test(abundance_clean, biomass_clean, method = "pearson")
+  pearson_r <- as.numeric(pearson_test$estimate)
+  pearson_p <- pearson_test$p.value
+  
+  # Effect size categorization
+  effect_size <- case_when(
+    r_squared < 0.01 ~ "negligible",
+    r_squared < 0.09 ~ "small",
+    r_squared < 0.25 ~ "medium",
+    TRUE ~ "large"
+  )
+  
+  # Compile results
+  results <- data.frame(
+    analysis = label,
+    n_samples = n_samples,
+    spearman_rho = round(rho, 3),
+    spearman_p = ifelse(p_value < 0.001, "<0.001", sprintf("%.3f", p_value)),
+    pearson_r = round(pearson_r, 3),
+    pearson_p = ifelse(pearson_p < 0.001, "<0.001", sprintf("%.3f", pearson_p)),
+    r_squared = round(r_squared, 3),
+    adj_r_squared = round(adj_r_squared, 3),
+    variance_explained_pct = round(r_squared * 100, 1),
+    effect_size = effect_size,
+    stringsAsFactors = FALSE
+  )
+  
+  cat("  Spearman ρ =", round(rho, 3), ", p =", ifelse(p_value < 0.001, "<0.001", sprintf("%.3f", p_value)), "\n")
+  cat("  R² =", round(r_squared, 3), "(", round(r_squared * 100, 1), "% variance explained)\n")
+  cat("  Effect size:", effect_size, "\n")
+  
+  return(list(
+    results = results,
+    data = data.frame(
+      sample = sample_names_clean,
+      abundance = abundance_clean, 
+      biomass = biomass_clean
+    )
+  ))
+}
+
+# ---- Run all analyses ----
+cat(rep("=", 80), "\n", sep = "")
+cat("MICROBE-BIOMASS EFFECT SIZE ANALYSIS\n")
+cat(rep("=", 80), "\n", sep = "")
+
+bact_A <- analyze_module_biomass_byorder(
+  file.path(mypath_res, "mEQO", "eqo_module_soilA_abundance_bacteria.csv"),
+  file.path(mypath_res, "mEQO", "dry_mass_soilA_bacteria.csv"),
+  "Bacteria_SoilA"
+)
+
+bact_B <- analyze_module_biomass_byorder(
+  file.path(mypath_res, "mEQO", "eqo_module_soilB_abundance_bacteria.csv"),
+  file.path(mypath_res, "mEQO", "dry_mass_soilB_bacteria.csv"),
+  "Bacteria_SoilB"
+)
+
+fungi_A <- analyze_module_biomass_byorder(
+  file.path(mypath_res, "mEQO", "eqo_module_soilA_abundance_fungi.csv"),
+  file.path(mypath_res, "mEQO", "dry_mass_soilA_fungi.csv"),
+  "Fungi_SoilA"
+)
+
+fungi_B <- analyze_module_biomass_byorder(
+  file.path(mypath_res, "mEQO", "eqo_module_soilB_abundance_fungi.csv"),
+  file.path(mypath_res, "mEQO", "dry_mass_soilB_fungi.csv"),
+  "Fungi_SoilB"
+)
+
+# ---- Compile results ----
+results_list <- list(bact_A, bact_B, fungi_A, fungi_B)
+results_list <- results_list[!sapply(results_list, is.null)]
+
+if(length(results_list) > 0) {
+  summary_table <- bind_rows(lapply(results_list, function(x) x$results))
+  
+  cat("\n\n")
+  cat(rep("=", 80), "\n", sep = "")
+  cat("SUMMARY TABLE\n")
+  cat(rep("=", 80), "\n", sep = "")
+  print(summary_table)
+  
+  # Save summary
+  write.csv(summary_table, 
+            file = file.path(mypath_res, "mEQO", "effect_size_summary.csv"),
+            row.names = FALSE)
+  
+  # ---- Generate publication text ----
+  cat("\n\n")
+  cat(rep("=", 80), "\n", sep = "")
+  cat("PUBLICATION-READY TEXT\n")
+  cat(rep("=", 80), "\n", sep = "")
+  
+  for(i in 1:nrow(summary_table)) {
+    row <- summary_table[i, ]
+    
+    sig_text <- ifelse(row$spearman_p == "<0.001" | as.numeric(row$spearman_p) < 0.05,
+                       "significant", "non-significant")
+    
+    cat(sprintf("\n%s:\n", row$analysis))
+    cat(sprintf("  Microbial modules exhibited %s associations with wheat biomass\n", sig_text))
+    cat(sprintf("  (ρ = %.2f, R² = %.2f, p %s), explaining %.1f%% of biomass variation\n",
+                row$spearman_rho, row$r_squared, row$spearman_p, row$variance_explained_pct))
+    cat(sprintf("  (%s effect size).\n", row$effect_size))
+  }
+  
+  # ---- Kingdom comparison ----
+  cat("\n")
+  cat(rep("-", 60), "\n", sep = "")
+  cat("KINGDOM COMPARISON:\n")
+  bact_rows <- summary_table[grepl("Bacteria", summary_table$analysis), ]
+  fungi_rows <- summary_table[grepl("Fungi", summary_table$analysis), ]
+  
+  if(nrow(bact_rows) > 0) {
+    cat(sprintf("  Bacteria: mean R² = %.3f (range: %.3f-%.3f)\n",
+                mean(bact_rows$r_squared),
+                min(bact_rows$r_squared),
+                max(bact_rows$r_squared)))
+  }
+  
+  if(nrow(fungi_rows) > 0) {
+    cat(sprintf("  Fungi: mean R² = %.3f (range: %.3f-%.3f)\n",
+                mean(fungi_rows$r_squared),
+                min(fungi_rows$r_squared),
+                max(fungi_rows$r_squared)))
+  }
+  
+  # ---- Soil comparison ----
+  cat("\n")
+  cat(rep("-", 60), "\n", sep = "")
+  cat("SOIL COMPARISON:\n")
+  soilA_rows <- summary_table[grepl("SoilA", summary_table$analysis), ]
+  soilB_rows <- summary_table[grepl("SoilB", summary_table$analysis), ]
+  
+  if(nrow(soilA_rows) > 0) {
+    cat(sprintf("  Soil A: mean R² = %.3f (range: %.3f-%.3f)\n",
+                mean(soilA_rows$r_squared),
+                min(soilA_rows$r_squared),
+                max(soilA_rows$r_squared)))
+  }
+  
+  if(nrow(soilB_rows) > 0) {
+    cat(sprintf("  Soil B: mean R² = %.3f (range: %.3f-%.3f)\n",
+                mean(soilB_rows$r_squared),
+                min(soilB_rows$r_squared),
+                max(soilB_rows$r_squared)))
+  }
+  
+  cat("\n\nResults saved to:\n")
+  cat("  ", file.path(mypath_res, "mEQO", "effect_size_summary.csv"), "\n")
+  
+} else {
+  cat("\n\nERROR: No successful analyses\n")
+}
+```
+
+
+
+
+
+
+
+### gradientforest
+
+
+physeq_bacteria 
+physeq_fungi
+
+```{r warning=FALSE}
+library(gradientForest)
+library(phyloseq)
+library(vegan)
+library(dplyr)
+
+# ============================================================================
+# COMPREHENSIVE GRADIENT FOREST DIAGNOSTIC AND FIX
+# ============================================================================
+
+# ============================================================================
+# STEP 1: DIAGNOSTIC FUNCTION - Check data before running GF
+# ============================================================================
+
+diagnose_physeq_for_gf <- function(physeq, soil_label, kingdom_label) {
+  
+  cat("\n==========================================================\n")
+  cat(sprintf("DIAGNOSING: %s - %s\n", kingdom_label, soil_label))
+  cat("==========================================================\n\n")
+  
+  # Extract components
+  if (taxa_are_rows(physeq)) {
+    otu_mat <- t(as.matrix(otu_table(physeq)))
+  } else {
+    otu_mat <- as.matrix(otu_table(physeq))
+  }
+  
+  meta <- data.frame(sample_data(physeq))
+  
+  # Sample names
+  otu_samples <- rownames(otu_mat)
+  meta_samples <- rownames(meta)
+  
+  cat("1. DIMENSIONS:\n")
+  cat(sprintf("   OTU matrix: %d samples × %d taxa\n", nrow(otu_mat), ncol(otu_mat)))
+  cat(sprintf("   Metadata: %d rows × %d columns\n", nrow(meta), ncol(meta)))
+  cat(sprintf("   Sample names match: %s\n", 
+              ifelse(identical(otu_samples, meta_samples), "YES ✓", "NO ✗")))
+  
+  if (!identical(otu_samples, meta_samples)) {
+    common <- intersect(otu_samples, meta_samples)
+    cat(sprintf("   Common samples: %d\n", length(common)))
+    
+    if (length(common) < length(otu_samples)) {
+      missing_in_meta <- setdiff(otu_samples, meta_samples)
+      cat(sprintf("   Missing in metadata: %d samples\n", length(missing_in_meta)))
+      cat("   First few:", head(missing_in_meta, 3), "\n")
+    }
+    
+    if (length(common) < length(meta_samples)) {
+      missing_in_otu <- setdiff(meta_samples, otu_samples)
+      cat(sprintf("   Missing in OTU: %d samples\n", length(missing_in_otu)))
+      cat("   First few:", head(missing_in_otu, 3), "\n")
+    }
+  }
+  
+  cat("\n2. METADATA COLUMNS:\n")
+  cat("   Available:", paste(colnames(meta), collapse = ", "), "\n")
+  
+  # Try to find biomass column
+  possible_biomass <- c("Dry_wheat_mass", "Wheat_Biomass", "biomass", 
+                        "dry_mass", "Wheat.biomass", "wheat_biomass")
+  biomass_col <- NULL
+  
+  for (col in possible_biomass) {
+    if (col %in% colnames(meta)) {
+      biomass_col <- col
+      break
+    }
+  }
+  
+  if (is.null(biomass_col)) {
+    cat("   ✗ PROBLEM: Cannot find biomass column!\n")
+    cat("   Looked for:", paste(possible_biomass, collapse = ", "), "\n")
+    return(NULL)
+  } else {
+    cat(sprintf("   ✓ Found biomass column: '%s'\n", biomass_col))
+  }
+  
+  # Check biomass values
+  biomass <- meta[[biomass_col]]
+  
+  cat("\n3. BIOMASS VALUES:\n")
+  cat(sprintf("   Total values: %d\n", length(biomass)))
+  cat(sprintf("   NAs: %d\n", sum(is.na(biomass))))
+  cat(sprintf("   Range: %.4f - %.4f\n", min(biomass, na.rm = TRUE), 
+              max(biomass, na.rm = TRUE)))
+  cat(sprintf("   Mean: %.4f (SD: %.4f)\n", mean(biomass, na.rm = TRUE), 
+              sd(biomass, na.rm = TRUE)))
+  
+  if (sd(biomass, na.rm = TRUE) == 0) {
+    cat("   ✗ PROBLEM: No variation in biomass!\n")
+    return(NULL)
+  }
+  
+  # Show biomass distribution
+  cat("   Quantiles:\n")
+  print(quantile(biomass, na.rm = TRUE, probs = c(0, 0.25, 0.5, 0.75, 1)))
+  
+  # Check OTU matrix
+  cat("\n4. OTU MATRIX:\n")
+  cat(sprintf("   Total entries: %d\n", length(otu_mat)))
+  cat(sprintf("   Zeros: %d (%.1f%%)\n", sum(otu_mat == 0), 
+              100 * sum(otu_mat == 0) / length(otu_mat)))
+  cat(sprintf("   Range: %.2e - %.2e\n", min(otu_mat), max(otu_mat)))
+  
+  # Taxa prevalence
+  taxa_prevalence <- colSums(otu_mat > 0) / nrow(otu_mat)
+  cat(sprintf("   Taxa with prevalence > 10%%: %d\n", sum(taxa_prevalence > 0.1)))
+  cat(sprintf("   Taxa with prevalence > 25%%: %d\n", sum(taxa_prevalence > 0.25)))
+  
+  cat("\n5. RECOMMENDED ACTIONS:\n")
+  
+  if (!identical(otu_samples, meta_samples)) {
+    cat("   → Align sample names between OTU and metadata\n")
+  }
+  
+  if (sum(is.na(biomass)) > 0) {
+    cat(sprintf("   → Remove %d samples with missing biomass\n", sum(is.na(biomass))))
+  }
+  
+  if (sum(taxa_prevalence < 0.05) > 0.5 * length(taxa_prevalence)) {
+    cat("   → Consider filtering rare taxa (many taxa present in <5% samples)\n")
+  }
+  
+  cat("\n==========================================================\n\n")
+  
+  return(list(
+    otu_mat = otu_mat,
+    metadata = meta,
+    biomass_col = biomass_col,
+    diagnostics_passed = TRUE
+  ))
+}
+
+# ============================================================================
+# STEP 2: CORRECTED GF FUNCTION WITH PROPER ERROR HANDLING
+# ============================================================================
+
+run_gf_corrected <- function(physeq, soil_type, kingdom, output_dir) {
+  
+  # Run diagnostics first
+  diag <- diagnose_physeq_for_gf(physeq, soil_type, kingdom)
+  
+  if (is.null(diag)) {
+    stop("Diagnostics failed. Fix issues above before proceeding.")
+  }
+  
+  cat(sprintf("\n=== RUNNING GRADIENT FOREST: %s - %s ===\n", kingdom, soil_type))
+  
+  # Get cleaned data from diagnostics
+  otu_mat <- diag$otu_mat
+  meta <- diag$metadata
+  biomass_col <- diag$biomass_col
+  
+  # Align samples
+  common_samples <- intersect(rownames(otu_mat), rownames(meta))
+  otu_mat <- otu_mat[common_samples, ]
+  meta <- meta[common_samples, ]
+  biomass <- meta[[biomass_col]]
+  
+  # Remove NAs
+  valid <- !is.na(biomass)
+  otu_mat <- otu_mat[valid, ]
+  biomass <- biomass[valid]
+  
+  cat(sprintf("Working with: %d samples × %d taxa\n", nrow(otu_mat), ncol(otu_mat)))
+  
+  # Hellinger transformation
+  otu_hell <- decostand(otu_mat, method = "hellinger")
+  
+  # Remove zero-variance taxa
+  taxa_var <- apply(otu_hell, 2, var)
+  otu_clean <- otu_hell[, taxa_var > 0]
+  
+  cat(sprintf("After variance filter: %d taxa\n", ncol(otu_clean)))
+  
+  # Create data frame
+  gf_data <- data.frame(
+    Wheat.biomass = biomass,
+    otu_clean,
+    check.names = FALSE
+  )
+  
+  # Run GF
+  cat("Running Gradient Forest...\n")
+  
+  gf_result <- gradientForest(
+    data = gf_data,
+    predictor.vars = "Wheat.biomass",
+    response.vars = colnames(gf_data)[-1],
+    ntree = 500,
+    maxLevel = floor(log2(nrow(gf_data) * 0.368/2)),
+    trace = TRUE,
+    corr.threshold = 0.5
+  )
+  
+  cat("GF complete. Extracting results...\n")
+  
+  # ============================================================================
+  # ROBUST RESULT EXTRACTION
+  # ============================================================================
+  
+  # Try multiple extraction methods
+  results_df <- NULL
+  
+  # Method 1: importance() function
+  tryCatch({
+    imp <- importance(gf_result, type = "Species")
+    
+    # Check if it's a matrix/data.frame
+    if (is.matrix(imp) || is.data.frame(imp)) {
+      cat("Extraction method 1 successful (importance function)\n")
+      
+      results_df <- data.frame(
+        spec = rownames(imp),
+        var = "Wheat.biomass",
+        rsq = if("R2" %in% colnames(imp)) imp[, "R2"] else NA,
+        improve.tot = if("Weighted.Importance" %in% colnames(imp)) imp[, "Weighted.Importance"] else imp[, 1],
+        stringsAsFactors = FALSE
+      )
+    } else if (is.vector(imp)) {
+      # Sometimes returns a vector
+      cat("Extraction method 1b successful (importance as vector)\n")
+      
+      results_df <- data.frame(
+        spec = names(imp),
+        var = "Wheat.biomass",
+        rsq = NA,
+        improve.tot = as.numeric(imp),
+        stringsAsFactors = FALSE
+      )
+    }
+  }, error = function(e) {
+    cat("Method 1 failed:", e$message, "\n")
+  })
+  
+  # Method 2: Direct extraction from object
+  if (is.null(results_df)) {
+    tryCatch({
+      cat("Trying method 2 (direct extraction)...\n")
+      
+      # Check structure
+      if (!is.null(gf_result$imp.rsq) && !is.null(gf_result$species.names)) {
+        results_df <- data.frame(
+          spec = gf_result$species.names,
+          var = "Wheat.biomass",
+          rsq = gf_result$imp.rsq,
+          improve.tot = if(!is.null(gf_result$imp.vars)) gf_result$imp.vars else gf_result$imp.rsq,
+          stringsAsFactors = FALSE
+        )
+        cat("Extraction method 2 successful\n")
+      }
+    }, error = function(e) {
+      cat("Method 2 failed:", e$message, "\n")
+    })
+  }
+  
+  # Method 3: Cumlative importance
+  if (is.null(results_df)) {
+    tryCatch({
+      cat("Trying method 3 (cumlative importance)...\n")
+      
+      cum_imp <- cumimp(gf_result, "Wheat.biomass")
+      
+      if (!is.null(cum_imp) && length(cum_imp) > 0) {
+        results_df <- data.frame(
+          spec = names(cum_imp),
+          var = "Wheat.biomass",
+          rsq = NA,
+          improve.tot = as.numeric(cum_imp),
+          stringsAsFactors = FALSE
+        )
+        cat("Extraction method 3 successful\n")
+      }
+    }, error = function(e) {
+      cat("Method 3 failed:", e$message, "\n")
+    })
+  }
+  
+  if (is.null(results_df)) {
+    stop("ERROR: All extraction methods failed. Cannot get results from GF object.")
+  }
+  
+  # Add variance columns
+  results_df$improve.tot.var <- results_df$improve.tot
+  results_df$rsq.var <- results_df$rsq
+  
+  # Filter and sort
+  results_df <- results_df %>%
+    filter(!is.na(improve.tot), improve.tot > 0) %>%
+    arrange(desc(improve.tot))
+  
+  # Save
+  soil_letter <- ifelse(soil_type == "resistant", "A", "B")
+  filename <- sprintf("%s_soil%s_species_df.csv", kingdom, soil_letter)
+  write.csv(results_df, file.path(output_dir, filename), row.names = TRUE)
+  
+  cat(sprintf("\n✓ SUCCESS: %d important taxa\n", nrow(results_df)))
+  cat(sprintf("✓ Saved: %s\n\n", filename))
+  
+  return(list(
+    gf_result = gf_result,
+    results_df = results_df,
+    soil = soil_type,
+    kingdom = kingdom
+  ))
+}
+
+# ============================================================================
+# STEP 3: USAGE EXAMPLE
+# ============================================================================
+
+# Set output directory
+output_dir <- file.path(mypath_res, "GradientForest")
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# Run diagnostics first (without running GF)
+cat("\n#################### DIAGNOSTICS ONLY ####################\n")
+
+diag_bacteria_A <- diagnose_physeq_for_gf(physeq_bacteria_A, "resistant", "bacteria")
+diag_bacteria_B <- diagnose_physeq_for_gf(physeq_bacteria_B, "Permissive", "bacteria")
+diag_fungi_A <- diagnose_physeq_for_gf(physeq_fungi_A, "resistant", "fungi")
+diag_fungi_B <- diagnose_physeq_for_gf(physeq_fungi_B, "Permissive", "fungi")
+
+cat("\n#################### DIAGNOSTICS COMPLETE ####################\n")
+cat("Review the output above. If all looks good, proceed with GF analysis.\n\n")
+
+# If diagnostics pass, run GF
+readline(prompt = "Press [Enter] to continue with Gradient Forest analysis, or Ctrl+C to stop: ")
+
+cat("\n#################### RUNNING GRADIENT FOREST ####################\n")
+
+gf_bacteria_A <- run_gf_corrected(physeq_bacteria_A, "resistant", "bacteria", output_dir)
+gf_bacteria_B <- run_gf_corrected(physeq_bacteria_B, "Permissive", "bacteria", output_dir)
+gf_fungi_A <- run_gf_corrected(physeq_fungi_A, "resistant", "fungi", output_dir)
+gf_fungi_B <- run_gf_corrected(physeq_fungi_B, "Permissive", "fungi", output_dir)
+
+cat("\n#################### ALL ANALYSES COMPLETE ####################\n")
+```
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+
+# ============================================================================
+# GRADIENT FOREST VISUALIZATION - COMPLETE WORKFLOW
+# ============================================================================
+
+mypath_res <- "/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4"
+gf_dir <- file.path(mypath_res, "GradientForest")
+fig_dir <- file.path(mypath_res, "figures")
+
+if (!dir.exists(fig_dir)) dir.create(fig_dir, recursive = TRUE)
+
+# ============================================================================
+# LOAD GRADIENT FOREST RESULTS
+# ============================================================================
+
+load_all_gf_results <- function(gf_dir) {
+  
+  # Load all four CSV files
+  bacteria_A <- read.csv(file.path(gf_dir, "bacteria_soilA_species_df.csv"), 
+                         row.names = 1, stringsAsFactors = FALSE)
+  bacteria_B <- read.csv(file.path(gf_dir, "bacteria_soilB_species_df.csv"), 
+                         row.names = 1, stringsAsFactors = FALSE)
+  fungi_A <- read.csv(file.path(gf_dir, "fungi_soilA_species_df.csv"), 
+                      row.names = 1, stringsAsFactors = FALSE)
+  fungi_B <- read.csv(file.path(gf_dir, "fungi_soilB_species_df.csv"), 
+                      row.names = 1, stringsAsFactors = FALSE)
+  
+  # Add metadata
+  bacteria_A$Kingdom <- "Bacteria"
+  bacteria_A$Soil <- "Cereal-dominated"
+  bacteria_B$Kingdom <- "Bacteria"
+  bacteria_B$Soil <- "Mixed-system"
+  fungi_A$Kingdom <- "Fungi"
+  fungi_A$Soil <- "Cereal-dominated"
+  fungi_B$Kingdom <- "Fungi"
+  fungi_B$Soil <- "Mixed-system"
+  
+  # Combine
+  all_results <- bind_rows(
+    bacteria_A, bacteria_B, fungi_A, fungi_B
+  )
+  
+  cat(sprintf("Loaded %d total taxa with importance > 0\n", nrow(all_results)))
+  cat(sprintf("  Bacteria cereal-dominated: %d taxa\n", nrow(bacteria_A)))
+  cat(sprintf("  Bacteria mixed-system: %d taxa\n", nrow(bacteria_B)))
+  cat(sprintf("  Fungi cereal-dominated: %d taxa\n", nrow(fungi_A)))
+  cat(sprintf("  Fungi mixed-system: %d taxa\n", nrow(fungi_B)))
+  
+  return(list(
+    bacteria_A = bacteria_A,
+    bacteria_B = bacteria_B,
+    fungi_A = fungi_A,
+    fungi_B = fungi_B,
+    combined = all_results
+  ))
+}
+
+gf_results <- load_all_gf_results(gf_dir)
+
+# ============================================================================
+# PLOT 1: CUMULATIVE IMPORTANCE CURVES
+# ============================================================================
+
+plot_gf_cumulative_importance <- function(gf_results, kingdom_filter) {
+  
+  # Filter by kingdom
+  data <- gf_results$combined %>%
+    filter(Kingdom == kingdom_filter) %>%
+    group_by(Soil) %>%
+    arrange(desc(improve.tot)) %>%
+    mutate(
+      taxa_rank = row_number(),
+      cumulative_importance = cumsum(improve.tot) / sum(improve.tot) * 100
+    ) %>%
+    ungroup()
+  
+  # Create plot
+  p <- ggplot(data, aes(x = taxa_rank, y = cumulative_importance, color = Soil)) +
+    geom_line(linewidth = 1.2) +
+    geom_hline(yintercept = c(50, 80), linetype = "dashed", 
+               color = "gray40", alpha = 0.6, linewidth = 0.4) +
+    annotate("text", x = max(data$taxa_rank) * 0.95, y = 50, 
+             label = "50%", hjust = 1, vjust = -0.5, 
+             size = 3, color = "gray40") +
+    annotate("text", x = max(data$taxa_rank) * 0.95, y = 80, 
+             label = "80%", hjust = 1, vjust = -0.5, 
+             size = 3, color = "gray40") +
+    scale_color_manual(
+      values = c("Cereal-dominated" = "#E41A1C", "Mixed-system" = "#377EB8"),
+      name = NULL
+    ) +
+    scale_y_continuous(limits = c(0, 100), expand = c(0.01, 0)) +
+    scale_x_continuous(expand = c(0.01, 0)) +
+    labs(
+      x = "Number of Taxa (ranked by importance)",
+      y = "Cumulative Importance (%)",
+      subtitle = kingdom_filter
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      legend.position = "none",
+      panel.grid.minor = element_blank(),
+      plot.subtitle = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.title = element_text(size = 10)
+    )
+  
+  return(p)
+}
+
+# Create cumulative plots for both kingdoms
+p_cumul_bacteria <- plot_gf_cumulative_importance(gf_results, "Bacteria")
+p_cumul_fungi <- plot_gf_cumulative_importance(gf_results, "Fungi")
+
+# Combine cumulative plots
+panel_GF_cumulative <- (p_cumul_bacteria | p_cumul_fungi) +
+  plot_layout(guides = "collect") +
+  plot_annotation(theme = theme(legend.position = "bottom"))
+
+# Save
+ggsave(file.path(fig_dir, "GF_cumulative_importance.pdf"), 
+       panel_GF_cumulative, width = 10, height = 4, dpi = 300)
+
+cat("✓ Saved: GF_cumulative_importance.pdf\n")
+
+# ============================================================================
+# PLOT 2: SUMMARY STATISTICS - Taxa Counts
+# ============================================================================
+
+plot_gf_summary_stats <- function(gf_results) {
+  
+  # Calculate summary stats
+  summary_data <- gf_results$combined %>%
+    group_by(Kingdom, Soil) %>%
+    summarise(
+      n_taxa = n(),
+      taxa_50pct = {
+        cumsum_imp <- cumsum(sort(improve.tot, decreasing = TRUE)) / sum(improve.tot)
+        sum(cumsum_imp <= 0.5)
+      },
+      taxa_80pct = {
+        cumsum_imp <- cumsum(sort(improve.tot, decreasing = TRUE)) / sum(improve.tot)
+        sum(cumsum_imp <= 0.8)
+      },
+      .groups = "drop"
+    )
+  
+  # Create plot
+  p <- ggplot(summary_data, aes(x = Kingdom, y = n_taxa, fill = Soil)) +
+    geom_col(position = position_dodge(width = 0.8), 
+             width = 0.7, color = "black", linewidth = 0.3) +
+    geom_text(aes(label = n_taxa),
+              position = position_dodge(width = 0.8),
+              vjust = -0.5, size = 3.5, fontface = "bold") +
+    scale_fill_manual(
+      values = c("Cereal-dominated" = "#E41A1C", "Mixed-system" = "#377EB8"),
+      name = NULL
+    ) +
+    scale_y_continuous(limits = c(0, max(summary_data$n_taxa) * 1.15), 
+                      expand = c(0, 0)) +
+    labs(
+      x = NULL,
+      y = "Number of Important Taxa",
+      subtitle = "Taxa with importance > 0"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.major.x = element_blank(),
+      plot.subtitle = element_text(size = 9, hjust = 0.5, face = "italic")
+    )
+  
+  return(p)
+}
+
+p_summary_stats <- plot_gf_summary_stats(gf_results)
+
+ggsave(file.path(fig_dir, "GF_summary_stats.pdf"), 
+       p_summary_stats, width = 6, height = 5, dpi = 300)
+
+cat("✓ Saved: GF_summary_stats.pdf\n")
+
+# ============================================================================
+# PLOT 3: TOP TAXA BAR PLOTS (Optional - for supplementary)
+# ============================================================================
+
+plot_gf_top_taxa <- function(gf_results, kingdom_filter, n_taxa = 10) {
+  
+  # Get top taxa per soil
+  data <- gf_results$combined %>%
+    filter(Kingdom == kingdom_filter) %>%
+    group_by(Soil) %>%
+    slice_max(order_by = improve.tot, n = n_taxa) %>%
+    mutate(
+      importance_pct = 100 * improve.tot / sum(improve.tot),
+      spec_short = gsub("Cluster_", "C", spec)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      spec_short = factor(spec_short, levels = unique(spec_short))
+    )
+  
+  # Plot
+  p <- ggplot(data, aes(x = importance_pct, y = reorder(spec_short, importance_pct), 
+                        fill = Soil)) +
+    geom_col() +
+    scale_fill_manual(
+      values = c("Cereal-dominated" = "#E41A1C", "Mixed-system" = "#377EB8"),
+      name = NULL
+    ) +
+    labs(
+      x = "Relative Importance (%)",
+      y = NULL,
+      title = sprintf("Top %d %s Taxa", n_taxa, kingdom_filter)
+    ) +
+    facet_wrap(~Soil, scales = "free", ncol = 2) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position = "none",
+      panel.grid.major.y = element_blank(),
+      strip.background = element_rect(fill = "gray90"),
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11)
+    )
+  
+  return(p)
+}
+
+p_top_bacteria <- plot_gf_top_taxa(gf_results, "Bacteria", n_taxa = 10)
+p_top_fungi <- plot_gf_top_taxa(gf_results, "Fungi", n_taxa = 8)
+
+# Save top taxa plots
+ggsave(file.path(fig_dir, "GF_top_taxa_bacteria.pdf"), 
+       p_top_bacteria, width = 10, height = 6, dpi = 300)
+ggsave(file.path(fig_dir, "GF_top_taxa_fungi.pdf"), 
+       p_top_fungi, width = 10, height = 5, dpi = 300)
+
+cat("✓ Saved: GF_top_taxa plots\n")
+
+# ============================================================================
+# PLOT 4: SIMPLIFIED PANEL FOR MAIN FIGURE (RECOMMENDED)
+# ============================================================================
+
+# This shows just the key message in minimal space
+plot_gf_minimal_panel <- function(gf_results) {
+  
+  # Calculate taxa needed for 50% and 80% cumulative importance
+  summary_data <- gf_results$combined %>%
+    group_by(Kingdom, Soil) %>%
+    summarise(
+      total_taxa = n(),
+      taxa_50pct = {
+        sorted_imp <- sort(improve.tot, decreasing = TRUE)
+        cumsum_imp <- cumsum(sorted_imp) / sum(sorted_imp)
+        sum(cumsum_imp <= 0.5) + 1  # +1 to include the taxa that crosses threshold
+      },
+      taxa_80pct = {
+        sorted_imp <- sort(improve.tot, decreasing = TRUE)
+        cumsum_imp <- cumsum(sorted_imp) / sum(sorted_imp)
+        sum(cumsum_imp <= 0.8) + 1
+      },
+      .groups = "drop"
+    ) %>%
+    mutate(
+      pct_50 = 100 * taxa_50pct / total_taxa,
+      pct_80 = 100 * taxa_80pct / total_taxa
+    )
+  
+  # Reshape for plotting
+  data_long <- summary_data %>%
+    select(Kingdom, Soil, taxa_50pct, taxa_80pct) %>%
+    pivot_longer(cols = c(taxa_50pct, taxa_80pct),
+                 names_to = "threshold",
+                 values_to = "n_taxa") %>%
+    mutate(
+      threshold_label = ifelse(threshold == "taxa_50pct", "50%", "80%")
+    )
+  
+  # Create plot
+  p <- ggplot(data_long, aes(x = Kingdom, y = n_taxa, fill = Soil)) +
+    geom_col(position = position_dodge(width = 0.8), 
+             width = 0.7, color = "black", linewidth = 0.3) +
+    geom_text(aes(label = n_taxa),
+              position = position_dodge(width = 0.8),
+              vjust = -0.5, size = 3, fontface = "bold") +
+    scale_fill_manual(
+      values = c("Cereal-dominated" = "#E41A1C", "Mixed-system" = "#377EB8"),
+      name = NULL
+    ) +
+    scale_y_continuous(limits = c(0, max(data_long$n_taxa) * 1.2), 
+                      expand = c(0, 0)) +
+    facet_wrap(~threshold_label, ncol = 2) +
+    labs(
+      x = NULL,
+      y = "Number of Taxa",
+      subtitle = "Taxa needed to explain cumulative importance"
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.major.x = element_blank(),
+      plot.subtitle = element_text(size = 9, hjust = 0.5, face = "italic"),
+      strip.background = element_rect(fill = "gray90")
+    )
+  
+  return(p)
+}
+
+panel_GF_minimal <- plot_gf_minimal_panel(gf_results)
+
+ggsave(file.path(fig_dir, "GF_minimal_panel.pdf"), 
+       panel_GF_minimal, width = 8, height = 4, dpi = 300)
+
+cat("✓ Saved: GF_minimal_panel.pdf\n")
+
+# ============================================================================
+# EXPORT RESULTS FOR TEXT
+# ============================================================================
+
+# Calculate summary statistics for reporting in text
+summary_for_text <- gf_results$combined %>%
+  group_by(Kingdom, Soil) %>%
+  summarise(
+    total_taxa = n(),
+    taxa_50pct = {
+      sorted_imp <- sort(improve.tot, decreasing = TRUE)
+      cumsum_imp <- cumsum(sorted_imp) / sum(sorted_imp)
+      sum(cumsum_imp <= 0.5) + 1
+    },
+    taxa_80pct = {
+      sorted_imp <- sort(improve.tot, decreasing = TRUE)
+      cumsum_imp <- cumsum(sorted_imp) / sum(sorted_imp)
+      sum(cumsum_imp <= 0.8) + 1
+    },
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_50 = round(100 * taxa_50pct / total_taxa, 1),
+    pct_80 = round(100 * taxa_80pct / total_taxa, 1)
+  )
+
+write.csv(summary_for_text, 
+          file.path(gf_dir, "GF_summary_for_text.csv"), 
+          row.names = FALSE)
+
+cat("\n=== GRADIENT FOREST SUMMARY STATISTICS ===\n")
+print(summary_for_text)
+cat("\n✓ Saved: GF_summary_for_text.csv\n")
+
+cat("\n=== ALL GRADIENT FOREST PLOTS COMPLETE ===\n")
+```
+creating turnover functions
+
+
+step 1 modify the gf objects
+```{r}
+cat("=== DIAGNOSING GRADIENT FOREST OBJECTS ===\n\n")
+
+# Check what objects exist in your environment
+if (!exists("gf_bacteria_A")) {
+  cat("ERROR: gf_bacteria_A not found in environment!\n")
+  cat("You need to load it first. Try:\n")
+  cat("  load('path/to/your/workspace.RData')\n")
+  cat("OR re-run the GF analysis script\n\n")
+  stop("GF objects not found")
+}
+
+# Function to diagnose a GF object
+diagnose_gf <- function(obj, name) {
+  cat(sprintf("--- Checking: %s ---\n", name))
+  
+  # Check if it's a list
+  cat(sprintf("  Type: %s\n", class(obj)[1]))
+  
+  if (is.list(obj)) {
+    cat("  Structure: List with components:\n")
+    cat(sprintf("    %s\n", paste(names(obj), collapse = ", ")))
+    
+    # Check for common components
+    if ("gf_result" %in% names(obj)) {
+      cat("  ✓ Found 'gf_result' component\n")
+      cat(sprintf("    gf_result class: %s\n", class(obj$gf_result)[1]))
+      
+      # Check if gf_result is the actual GF object
+      if ("gradientForest" %in% class(obj$gf_result)) {
+        cat("  ✓ gf_result IS a gradientForest object!\n")
+        cat("  → Solution: Use obj$gf_result for plotting\n")
+        return(obj$gf_result)
+      }
+    }
+    
+    # Check if the list itself is a GF object
+    if ("gradientForest" %in% class(obj)) {
+      cat("  ✓ Object IS a gradientForest!\n")
+      cat("  → Solution: Use obj directly for plotting\n")
+      return(obj)
+    }
+    
+    # Check each component
+    for (comp_name in names(obj)) {
+      comp <- obj[[comp_name]]
+      if ("gradientForest" %in% class(comp)) {
+        cat(sprintf("  ✓ Found gradientForest in '%s' component!\n", comp_name))
+        cat(sprintf("  → Solution: Use obj$%s for plotting\n", comp_name))
+        return(comp)
+      }
+    }
+    
+    cat("  ✗ No gradientForest object found in any component\n")
+    return(NULL)
+    
+  } else if ("gradientForest" %in% class(obj)) {
+    cat("  ✓ This IS a gradientForest object!\n")
+    cat("  → Solution: Use obj directly for plotting\n")
+    return(obj)
+  } else {
+    cat("  ✗ Not a list and not a gradientForest object\n")
+    cat(sprintf("    Actual class: %s\n", paste(class(obj), collapse = ", ")))
+    return(NULL)
+  }
+  
+  cat("\n")
+}
+
+# Diagnose all four objects
+cat("\n=== BACTERIA - CEREAL-DOMINATED (AF193) ===\n")
+gf_bacteria_A_fixed <- diagnose_gf(gf_bacteria_A, "gf_bacteria_A")
+
+cat("\n=== BACTERIA - MIXED-SYSTEM (AF190) ===\n")
+gf_bacteria_B_fixed <- diagnose_gf(gf_bacteria_B, "gf_bacteria_B")
+
+cat("\n=== FUNGI - CEREAL-DOMINATED (AF193) ===\n")
+gf_fungi_A_fixed <- diagnose_gf(gf_fungi_A, "gf_fungi_A")
+
+cat("\n=== FUNGI - MIXED-SYSTEM (AF190) ===\n")
+gf_fungi_B_fixed <- diagnose_gf(gf_fungi_B, "gf_fungi_B")
+
+# ============================================================================
+# TEST THE FIXED OBJECTS
+# ============================================================================
+
+cat("\n=== TESTING FIXED OBJECTS ===\n\n")
+
+test_plot <- function(obj, name) {
+  if (is.null(obj)) {
+    cat(sprintf("✗ %s: No valid GF object found\n", name))
+    return(FALSE)
+  }
+  
+  tryCatch({
+    # Try to plot with type O (overall importance)
+    pdf(NULL)  # Suppress output
+    plot(obj, plot.type = "O")
+    dev.off()
+    cat(sprintf("✓ %s: Plot works!\n", name))
+    return(TRUE)
+  }, error = function(e) {
+    cat(sprintf("✗ %s: Plot failed - %s\n", name, e$message))
+    return(FALSE)
+  })
+}
+
+bacteria_A_ok <- test_plot(gf_bacteria_A_fixed, "Bacteria cereal")
+bacteria_B_ok <- test_plot(gf_bacteria_B_fixed, "Bacteria mixed")
+fungi_A_ok <- test_plot(gf_fungi_A_fixed, "Fungi cereal")
+fungi_B_ok <- test_plot(gf_fungi_B_fixed, "Fungi mixed")
+
+# ============================================================================
+# CREATE CORRECTED OBJECTS
+# ============================================================================
+
+if (all(c(bacteria_A_ok, bacteria_B_ok, fungi_A_ok, fungi_B_ok))) {
+  cat("\n✓ ALL OBJECTS WORKING!\n\n")
+  cat("Creating corrected objects in your environment:\n")
+  cat("  - gf_bacteria_A_corrected\n")
+  cat("  - gf_bacteria_B_corrected\n")
+  cat("  - gf_fungi_A_corrected\n")
+  cat("  - gf_fungi_B_corrected\n\n")
+  
+  assign("gf_bacteria_A_corrected", gf_bacteria_A_fixed, envir = .GlobalEnv)
+  assign("gf_bacteria_B_corrected", gf_bacteria_B_fixed, envir = .GlobalEnv)
+  assign("gf_fungi_A_corrected", gf_fungi_A_fixed, envir = .GlobalEnv)
+  assign("gf_fungi_B_corrected", gf_fungi_B_fixed, envir = .GlobalEnv)
+  
+  cat("Now you can use them like this:\n\n")
+  cat("  plot(gf_bacteria_A_corrected, plot.type = \"O\")\n")
+  cat("  plot(gf_bacteria_A_corrected, plot.type = \"C\", \n")
+  cat("       imp.vars = names(sort(importance(gf_bacteria_A_corrected), decreasing = TRUE)),\n")
+  cat("       show.overall = FALSE, legend = TRUE)\n\n")
+  
+} else {
+  cat("\n✗ SOME OBJECTS NOT WORKING\n")
+  cat("Please check the diagnostic output above\n\n")
+}
+
+cat("=== DIAGNOSIS COMPLETE ===\n")
+```
+
+
+```{r}
+cat("STEP 3: Creating turnover function plots...\n\n")
+
+# Function to create one turnover plot
+create_turnover_plot <- function(gf_obj, title, filename, n_species = 5) {
+  
+  cat(sprintf("  Creating: %s\n", filename))
+  
+  # Get importance and rank species
+  imp <- importance(gf_obj)
+  
+  # Handle different return types
+  if (is.matrix(imp) || is.data.frame(imp)) {
+    if ("Weighted.Importance" %in% colnames(imp)) {
+      by_importance <- rownames(imp)[order(imp[, "Weighted.Importance"], decreasing = TRUE)]
+    } else {
+      by_importance <- rownames(imp)[order(imp[, 1], decreasing = TRUE)]
+    }
+  } else if (is.vector(imp)) {
+    by_importance <- names(sort(imp, decreasing = TRUE))
+  }
+  
+  # Create plot
+  pdf(file.path(fig_dir, filename), width = 6, height = 5)
+  
+  plot(gf_obj, 
+       plot.type = "C",
+       imp.vars = by_importance,
+       show.overall = FALSE,
+       legend = TRUE,
+       leg.posn = "topleft",
+       leg.nspecies = n_species,
+       cex.lab = 0.9,
+       cex.legend = 0.7,
+       cex.axis = 0.8,
+       line.ylab = 1.2,
+       par.args = list(
+         mgp = c(2, 0.7, 0),
+         mar = c(3.5, 3.5, 2, 1)
+       ),
+       main = title
+  )
+  
+  dev.off()
+  
+  cat(sprintf("    ✓ Saved: %s\n", filename))
+}
+
+# Create individual plots
+create_turnover_plot(gf_bacteria_A_corrected, 
+                     "Bacteria - Cereal-dominated", 
+                     "GF_turnover_bacteria_cereal.pdf", 
+                     n_species = 5)
+
+create_turnover_plot(gf_bacteria_B_corrected, 
+                     "Bacteria - Mixed-system", 
+                     "GF_turnover_bacteria_mixed.pdf", 
+                     n_species = 5)
+
+create_turnover_plot(gf_fungi_A_corrected, 
+                     "Fungi - Cereal-dominated", 
+                     "GF_turnover_fungi_cereal.pdf", 
+                     n_species = 3)
+
+create_turnover_plot(gf_fungi_B_corrected, 
+                     "Fungi - Mixed-system", 
+                     "GF_turnover_fungi_mixed.pdf", 
+                     n_species = 2)
+```
+
+
+panel C - gradient forest
+
+```{r}
+pdf(file.path(fig_dir, "Figure4_PanelC_GF_turnover.pdf"), width = 12, height = 10)
+
+# Set up 2x2 layout
+par(mfrow = c(2, 2))
+
+# Top left: Bacteria Cereal
+imp_bac_A <- importance(gf_bacteria_A_corrected)
+by_imp_bac_A <- if (is.vector(imp_bac_A)) {
+  names(sort(imp_bac_A, decreasing = TRUE))
+} else {
+  rownames(imp_bac_A)[order(imp_bac_A[, 1], decreasing = TRUE)]
+}
+
+plot(gf_bacteria_A_corrected, 
+     plot.type = "C",
+     imp.vars = by_imp_bac_A,
+     show.overall = FALSE,
+     legend = TRUE,
+     leg.posn = "topleft",
+     leg.nspecies = 5,
+     cex.lab = 0.9,
+     cex.legend = 0.7,
+     cex.axis = 0.8,
+     line.ylab = 1.2,
+     par.args = list(mgp = c(2, 0.7, 0), mar = c(3.5, 3.5, 2, 1)),
+     main = "Bacteria - Cereal-dominated"
+)
+
+# Top right: Bacteria Mixed
+imp_bac_B <- importance(gf_bacteria_B_corrected)
+by_imp_bac_B <- if (is.vector(imp_bac_B)) {
+  names(sort(imp_bac_B, decreasing = TRUE))
+} else {
+  rownames(imp_bac_B)[order(imp_bac_B[, 1], decreasing = TRUE)]
+}
+
+plot(gf_bacteria_B_corrected, 
+     plot.type = "C",
+     imp.vars = by_imp_bac_B,
+     show.overall = FALSE,
+     legend = TRUE,
+     leg.posn = "topleft",
+     leg.nspecies = 5,
+     cex.lab = 0.9,
+     cex.legend = 0.7,
+     cex.axis = 0.8,
+     line.ylab = 1.2,
+     par.args = list(mgp = c(2, 0.7, 0), mar = c(3.5, 3.5, 2, 1)),
+     main = "Bacteria - Mixed-system"
+)
+
+# Bottom left: Fungi Cereal
+imp_fun_A <- importance(gf_fungi_A_corrected)
+by_imp_fun_A <- if (is.vector(imp_fun_A)) {
+  names(sort(imp_fun_A, decreasing = TRUE))
+} else {
+  rownames(imp_fun_A)[order(imp_fun_A[, 1], decreasing = TRUE)]
+}
+
+plot(gf_fungi_A_corrected, 
+     plot.type = "C",
+     imp.vars = by_imp_fun_A,
+     show.overall = FALSE,
+     legend = TRUE,
+     leg.posn = "topleft",
+     leg.nspecies = 3,
+     cex.lab = 0.9,
+     cex.legend = 0.7,
+     cex.axis = 0.8,
+     line.ylab = 1.2,
+     par.args = list(mgp = c(2, 0.7, 0), mar = c(3.5, 3.5, 2, 1)),
+     main = "Fungi - Cereal-dominated"
+)
+
+# Bottom right: Fungi Mixed
+imp_fun_B <- importance(gf_fungi_B_corrected)
+by_imp_fun_B <- if (is.vector(imp_fun_B)) {
+  names(sort(imp_fun_B, decreasing = TRUE))
+} else {
+  rownames(imp_fun_B)[order(imp_fun_B[, 1], decreasing = TRUE)]
+}
+
+plot(gf_fungi_B_corrected, 
+     plot.type = "C",
+     imp.vars = by_imp_fun_B,
+     show.overall = FALSE,
+     legend = TRUE,
+     leg.posn = "topleft",
+     leg.nspecies = 2,
+     cex.lab = 0.9,
+     cex.legend = 0.7,
+     cex.axis = 0.8,
+     line.ylab = 1.2,
+     par.args = list(mgp = c(2, 0.7, 0), mar = c(3.5, 3.5, 2, 1)),
+     main = "Fungi - Mixed-system"
+)
+
+dev.off()
+
+cat("✓ Saved: Figure4_PanelC_GF_turnover.pdf\n")
+cat("  This is your Panel C for Figure 4!\n\n")
+```
+
+
+
+save resutls
+```{r}
+library(dplyr)
+
+# ============================================================================
+# SIMPLE GF RESULTS EXTRACTION - Just save res.u tables
+# ============================================================================
+
+mypath_res <- "/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4"
+gf_dir <- file.path(mypath_res, "GradientForest")
+
+cat("=== EXTRACTING GF IMPORTANCE RESULTS ===\n\n")
+
+# ============================================================================
+# EXTRACT res.u FROM EACH GF OBJECT
+# ============================================================================
+
+# Bacteria - Cereal-dominated (AF193)
+bacteria_A_importance <- gf_bacteria_A_corrected$res.u
+bacteria_A_importance$kingdom <- "Bacteria"
+bacteria_A_importance$soil <- "cereal"
+bacteria_A_importance$soil_full <- "Cereal-dominated (AF193)"
+
+# Bacteria - Mixed-system (AF190)  
+bacteria_B_importance <- gf_bacteria_B_corrected$res.u
+bacteria_B_importance$kingdom <- "Bacteria"
+bacteria_B_importance$soil <- "mixed"
+bacteria_B_importance$soil_full <- "Mixed-system (AF190)"
+
+# Fungi - Cereal-dominated (AF193)
+fungi_A_importance <- gf_fungi_A_corrected$res.u
+fungi_A_importance$kingdom <- "Fungi"
+fungi_A_importance$soil <- "cereal"
+fungi_A_importance$soil_full <- "Cereal-dominated (AF193)"
+
+# Fungi - Mixed-system (AF190)
+fungi_B_importance <- gf_fungi_B_corrected$res.u
+fungi_B_importance$kingdom <- "Fungi"
+fungi_B_importance$soil <- "mixed"
+fungi_B_importance$soil_full <- "Mixed-system (AF190)"
+
+# ============================================================================
+# COMBINE AND ADD RANKINGS
+# ============================================================================
+
+all_importance <- rbind(
+  bacteria_A_importance,
+  bacteria_B_importance,
+  fungi_A_importance,
+  fungi_B_importance
+)
+
+# Rename columns for clarity
+all_importance <- all_importance %>%
+  rename(
+    taxon = spec,
+    variable = var,
+    r_squared = rsq,
+    importance = improve.tot,
+    importance_per_var = improve.tot.var,
+    r_squared_per_var = rsq.var
+  )
+
+# Add rankings within each group
+all_importance <- all_importance %>%
+  group_by(kingdom, soil) %>%
+  mutate(
+    rank = rank(-importance, ties.method = "first"),
+    cumulative_importance = cumsum(importance) / sum(importance)
+  ) %>%
+  ungroup() %>%
+  arrange(kingdom, soil, rank)
+
+# ============================================================================
+# SAVE RESULTS
+# ============================================================================
+
+# Save combined file
+write.csv(all_importance, 
+          file.path(gf_dir, "gf_importance_all_simple.csv"),
+          row.names = FALSE)
+
+cat("✓ Saved: gf_importance_all_simple.csv\n")
+
+# Also save individual files for each combination
+write.csv(bacteria_A_importance,
+          file.path(gf_dir, "bacteria_cereal_importance.csv"),
+          row.names = FALSE)
+cat("✓ Saved: bacteria_cereal_importance.csv\n")
+
+write.csv(bacteria_B_importance,
+          file.path(gf_dir, "bacteria_mixed_importance.csv"),
+          row.names = FALSE)
+cat("✓ Saved: bacteria_mixed_importance.csv\n")
+
+write.csv(fungi_A_importance,
+          file.path(gf_dir, "fungi_cereal_importance.csv"),
+          row.names = FALSE)
+cat("✓ Saved: fungi_cereal_importance.csv\n")
+
+write.csv(fungi_B_importance,
+          file.path(gf_dir, "fungi_mixed_importance.csv"),
+          row.names = FALSE)
+cat("✓ Saved: fungi_mixed_importance.csv\n")
+
+# ============================================================================
+# CREATE SUMMARY
+# ============================================================================
+
+summary_stats <- all_importance %>%
+  group_by(kingdom, soil) %>%
+  summarise(
+    n_taxa = n(),
+    n_taxa_50pct = sum(cumulative_importance <= 0.50),
+    n_taxa_80pct = sum(cumulative_importance <= 0.80),
+    mean_importance = mean(importance),
+    max_importance = max(importance),
+    min_importance = min(importance),
+    .groups = "drop"
+  )
+
+write.csv(summary_stats,
+          file.path(gf_dir, "gf_importance_summary.csv"),
+          row.names = FALSE)
+cat("✓ Saved: gf_importance_summary.csv\n")
+
+# ============================================================================
+# PRINT SUMMARY
+# ============================================================================
+
+cat("\n=== SUMMARY ===\n\n")
+
+print(summary_stats, n = Inf)
+
+cat("\n=== TOP 5 TAXA PER GROUP ===\n\n")
+
+top5 <- all_importance %>%
+  filter(rank <= 5) %>%
+  select(kingdom, soil, taxon, importance, rank, cumulative_importance)
+
+print(as.data.frame(top5), row.names = FALSE)
+
+cat("\n==========================================================\n")
+cat("RESULTS SAVED TO:\n")
+cat(sprintf("  %s/\n", gf_dir))
+cat("\nFILES:\n")
+cat("  • gf_importance_all_simple.csv (combined, n=", nrow(all_importance), ")\n")
+cat("  • bacteria_cereal_importance.csv\n")
+cat("  • bacteria_mixed_importance.csv\n")
+cat("  • fungi_cereal_importance.csv\n")
+cat("  • fungi_mixed_importance.csv\n")
+cat("  • gf_importance_summary.csv\n")
+cat("\nCOLUMNS:\n")
+cat("  • taxon: Cluster ID\n")
+cat("  • variable: Wheat.biomass\n")
+cat("  • importance: Variable importance score (main metric)\n")
+cat("  • r_squared: R-squared contribution\n")
+cat("  • rank: Importance ranking (1 = highest)\n")
+cat("  • cumulative_importance: Cumulative % of total importance\n")
+cat("  • kingdom: Bacteria or Fungi\n")
+cat("  • soil: cereal or mixed\n")
+cat("\nREADY FOR PYTHON!\n")
+cat("==========================================================\n")
+```
+
+
+
+
+fig 4 integration
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+# ============================================================================
+# FINAL FIGURE 4: INTEGRATION OF ALL THREE METHODS
+# TITAN2 + mEQO + GRADIENT FOREST
+# ============================================================================
+
+mypath_res <- "/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4"
+fig_dir <- file.path(mypath_res, "figures")
+
+# ============================================================================
+# STEP 1: LOAD OR CREATE ALL PANELS
+# ============================================================================
+
+# Assuming you already have these panels created from previous scripts:
+# - panel_A: TITAN2 change-points (4 panels: bacteria/fungi × cereal/mixed)
+# - panel_B: mEQO correlation plots (2 panels: bacteria, fungi)
+# - panel_GF_cumulative OR panel_GF_minimal: Gradient Forest
+
+# If you need to recreate them, source the respective scripts:
+# source("create_titan2_panel.R")  # Creates panel_A
+# source("create_meqo_panel.R")     # Creates panel_B
+# source("gradient_forest_visualization.R")  # Creates panel_GF_cumulative
+
+cat("Creating Final Figure 4 with three methods...\n")
+
+# ============================================================================
+# LAYOUT OPTION A: RECOMMENDED - Side-by-side bottom panels
+# ============================================================================
+# 
+# ┌─────────────────────────────────────────────┐
+# │  A: TITAN2 Change-Points                    │
+# │  [4 panels: Bacteria/Fungi × Cereal/Mixed]  │
+# │                                              │
+# ├──────────────────────┬──────────────────────┤
+# │  B: mEQO Correlation │ C: Gradient Forest   │
+# │  [2 panels: Bac/Fun] │ [2 panels: Bac/Fun]  │
+# └──────────────────────┴──────────────────────┘
+
+figure4_option_A <- panel_A / 
+  (panel_B | panel_GF_cumulative) +
+  plot_layout(heights = c(3, 1.5)) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_suffix = '.',
+    theme = theme(plot.tag = element_text(size = 14, face = "bold"))
+  )
+
+ggsave(file.path(fig_dir, "Figure4_FINAL_OptionA.pdf"), 
+       figure4_option_A, width = 14, height = 12, dpi = 300)
+
+cat("✓ Saved: Figure4_FINAL_OptionA.pdf (RECOMMENDED)\n")
+
+# ============================================================================
+# LAYOUT OPTION B: All stacked vertically
+# ============================================================================
+# 
+# ┌─────────────────────────────────────────────┐
+# │  A: TITAN2 Change-Points                    │
+# ├─────────────────────────────────────────────┤
+# │  B: mEQO Correlation                        │
+# ├─────────────────────────────────────────────┤
+# │  C: Gradient Forest Cumulative Importance   │
+# └─────────────────────────────────────────────┘
+
+figure4_option_B <- panel_A / 
+  panel_B / 
+  panel_GF_cumulative +
+  plot_layout(heights = c(3, 1.5, 1.2)) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_suffix = '.',
+    theme = theme(plot.tag = element_text(size = 14, face = "bold"))
+  )
+
+ggsave(file.path(fig_dir, "Figure4_FINAL_OptionB.pdf"), 
+       figure4_option_B, width = 12, height = 15, dpi = 300)
+
+cat("✓ Saved: Figure4_FINAL_OptionB.pdf\n")
+
+# ============================================================================
+# LAYOUT OPTION C: Minimal GF panel (if space is tight)
+# ============================================================================
+# 
+# Uses the simplified GF panel showing just taxa counts for 50%/80% thresholds
+
+figure4_option_C <- panel_A / 
+  (panel_B | panel_GF_minimal) +
+  plot_layout(heights = c(3, 1.5)) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_suffix = '.',
+    theme = theme(plot.tag = element_text(size = 14, face = "bold"))
+  )
+
+ggsave(file.path(fig_dir, "Figure4_FINAL_OptionC.pdf"), 
+       figure4_option_C, width = 14, height = 12, dpi = 300)
+
+cat("✓ Saved: Figure4_FINAL_OptionC.pdf\n")
+
+# ============================================================================
+# LAYOUT OPTION D: Two-row layout with all methods visible
+# ============================================================================
+# 
+# ┌──────────────────────┬──────────────────────┐
+# │  A: TITAN2           │  A: TITAN2           │
+# │  [Bacteria panels]   │  [Fungi panels]      │
+# ├──────────────────────┼──────────────────────┤
+# │  B: mEQO             │  C: Gradient Forest  │
+# └──────────────────────┴──────────────────────┘
+
+# This requires splitting panel_A by kingdom, which needs modification
+# Skip this for now unless specifically requested
+
+# ============================================================================
+# LAYOUT OPTION E: Comprehensive with summary stats
+# ============================================================================
+# 
+# Includes all information: TITAN2 + mEQO + GF cumulative + GF summary
+
+figure4_option_E <- panel_A / 
+  panel_B / 
+  panel_GF_cumulative / 
+  p_summary_stats +
+  plot_layout(heights = c(3, 1.5, 1.2, 1)) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_suffix = '.',
+    theme = theme(plot.tag = element_text(size = 14, face = "bold"))
+  )
+
+ggsave(file.path(fig_dir, "Figure4_FINAL_OptionE_comprehensive.pdf"), 
+       figure4_option_E, width = 12, height = 17, dpi = 300)
+
+cat("✓ Saved: Figure4_FINAL_OptionE_comprehensive.pdf\n")
+
+# ============================================================================
+# CREATE INDIVIDUAL PANEL FILES (for flexibility)
+# ============================================================================
+
+ggsave(file.path(fig_dir, "Figure4_PanelA_TITAN2.pdf"), 
+       panel_A, width = 12, height = 8, dpi = 300)
+
+ggsave(file.path(fig_dir, "Figure4_PanelB_mEQO.pdf"), 
+       panel_B, width = 10, height = 5, dpi = 300)
+
+ggsave(file.path(fig_dir, "Figure4_PanelC_GF_cumulative.pdf"), 
+       panel_GF_cumulative, width = 10, height = 4, dpi = 300)
+
+writeLines(figure4_legend, file.path(fig_dir, "Figure4_legend.txt"))
+```
+
+
+
+
+### Titan
+https://uw.pressbooks.pub/appliedmultivariatestatistics/chapter/titan/
+
+```{r - titan - whole dataset}
+library(phyloseq)
+library(TITAN2)
+
+# Step 1: Define Output Directory
+output_dir_full <- file.path(mypath_res, "TITAN_Full_Dataset")
+if (!dir.exists(output_dir_full)) {
+  dir.create(output_dir_full, recursive = TRUE)  # Create the directory if it doesn't exist
+}
+
+physeq_titan <- subset_samples(physeq, soil == "Permissive")  # Adjust to "resistant" "Permissive" or "resistant" if needed
+# physeq_titan <- physeq_soilA
+
+# OTU table as community matrix (samples x taxa)
+community_matrix <- as.matrix(otu_table(physeq_titan))
+if (taxa_are_rows(physeq_titan)) {
+  community_matrix <- t(community_matrix)  # Ensure taxa are columns
+}
+
+# Step 3: Extract Environmental Gradient
+# Replace "your_gradient_column" with the appropriate column name from your metadata
+metadata <- sample_data(physeq_titan)
+gradient <- metadata$Dry_wheat_mass  # Replace with the actual column name
+
+# Ensure the gradient is numeric
+gradient <- as.numeric(as.character(gradient))
+
+# Step 4: Handle Missing Values
+# Remove samples with missing values in the gradient
+valid_samples <- !is.na(gradient)  # Logical vector for valid samples
+community_matrix_clean <- community_matrix[valid_samples, ]
+gradient_clean <- gradient[valid_samples]
+
+# Step 5: Filter Rare Taxa
+# Retain only taxa that occur in at least 3 samples
+taxa_occurrence <- colSums(community_matrix_clean > 0)  # Count occurrences
+community_matrix_filtered <- community_matrix_clean[, taxa_occurrence >= 10]
+
+# Step 6: Run TITAN
+titan_result_soilB <- titan(
+  env = gradient_clean,
+  txa = community_matrix_filtered,
+  pur.cut = 0.95,       # Purity threshold (default 0.95)
+  rel.cut = 0.95,       # Reliability threshold (default 0.95)
+  minSplt = 5,          # Minimum split size
+  nBoot = 500,          # Number of bootstrap replicates
+  boot = TRUE,          # Perform bootstrap analysis
+  imax = FALSE,         # Use sumz (default)
+  ivTot = FALSE,        # Calculate indicator value by sumz
+  ncpus = 1,            # Number of CPUs (increase if possible)
+  messaging = TRUE      # Enable messages
+)
+
+# titan_result_full_purity0.8_reliabiliy.8 <- titan_result_full
+
+# Step 7: Summarize Results
+# View summary of TITAN results
+summary(titan_result_soilB)
+output_dir_full <- file.path(mypath_res, "TITAN_Full_Dataset")
+
+# write.csv(titan_result_soilA$sppmax, file.path(output_dir_full, "bacteria_titan_soilA_results_v3.csv"), row.names = TRUE)
+
+
+
+
+write.csv(titan_result_soilB$sppmax, file.path(output_dir_full, "bacteria_titan_soilB_results_v3.csv"), row.names = TRUE)
+# Step 9: Extract Significant Indicator Taxa
+# Extract sppmax from TITAN results
+sppmax <- titan_result_full$sppmax
+high_conf_taxa <- sppmax[sppmax$maxgrp == 2 & sppmax$purity > 0.9 & sppmax$reliability > 0.9, ]
+high_conf_taxa <- sppmax[sppmax$purity > 0.95 & sppmax$reliability > 0.95, ]
+high_conf_taxa_purity <- sppmax[sppmax$maxgrp == 2 & sppmax$purity > 0.95, ]
+
+# Step 10: Save Significant Results
+# Save positive and negative taxa to CSV
+write.csv(high_conf_taxa, file.path(output_dir_full, "bacteria_positive_taxa_full.csv"), row.names = FALSE)
+write.csv(negative_taxa_full, file.path(output_dir_full, "bacteria_negative_taxa_full.csv"), row.names = FALSE)
+
+# Save the full TITAN results to a CSV file
+write.csv(titan_result_full$sppmax, file.path(output_dir_full, "bacteria_titan_results_full.csv"), row.names = FALSE)
+
+
+# declining (i.e., maxgrp== 1) ; increasing declining (i.e., maxgrp== 2) 
+
+plot_sumz_density(titan_result_soilA, ribbon = FALSE, points = TRUE)
+plot_sumz_density(titan_result_soilB, ribbon = FALSE, points = TRUE)
+
+plot_sumz(titan_result_full, filter = TRUE)
+plot_taxa_ridges(titan_result_full, axis.text.y = 8)
+plot_taxa_ridges(titan_result_full, xlabel = expression(paste("Wheat biomass"), n_ytaxa = 50))
+plot_taxa_ridges(titan_result_full, xlabel = expression(paste("wheat biomass")), z1 = FALSE) # only positive
+
+plot_taxa_ridges(titan_result_full, xlabel = expression(paste("wheat biomass")), z1 = FALSE, z2_fill_high = "#56B1F7") # only positive
+
+
+plot_taxa(titan_result_full, xlabel = expression(paste("wheat biomass")), cex.taxa = 0.5, cex = 1.25, cex.axis = 1.1, legend = FALSE, col1 = "black", col2 = "red", fil2 = "red")
+plot_cps(titan_result_full, taxaID = "Cluster_462", xlabel = "wheat biomass")
+plot_cps(titan_result_full, taxaID = "Cluster_1155", cp.trace = TRUE, xlabel = "wheat biomass")
+```
+
+
+
+```{r}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(ggrepel)
+
+# ============================================================================
+# CONFIGURATION - ADJUST THESE PATHS
+# ============================================================================
+
+titan_dir <- ""
+output_dir <- file.path(titan_dir, "validation_plots")
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# Load your phyloseq object to get metadata
+# Adjust this to however you load your data
+# physeq_bacteria <- readRDS("path/to/your/physeq_bacteria.rds")
+# OR if already in environment, just use it directly
+
+# ============================================================================
+# LOAD TITAN2 RESULTS FROM CSV FILES
+# ============================================================================
+
+# Read all four TITAN2 result files
+titan_files <- data.frame(
+  kingdom = c("bacteria", "bacteria", "fungi", "fungi"),
+  soil = c("resistant", "Permissive", "resistant", "Permissive"),
+  soil_code = c("soilA", "soilB", "soilA", "soilB"),
+  file = c(
+    "bacteria_titan_soilA_results_v3.csv",
+    "bacteria_titan_soilB_results_v3.csv",
+    "fungi_titan_soilA_results_v3.csv",
+    "fungi_titan_soilB_results_v3.csv"
+  )
+)
+
+# Read and combine all TITAN2 results
+titan_list <- lapply(1:nrow(titan_files), function(i) {
+  filepath <- file.path(titan_dir, titan_files$file[i])
+  
+  if (!file.exists(filepath)) {
+    warning(sprintf("File not found: %s", filepath))
+    return(NULL)
+  }
+  
+  df <- read.csv(filepath, row.names = 1, check.names = FALSE)
+  
+  # Add metadata columns
+  df$taxa <- rownames(df)
+  df$kingdom <- titan_files$kingdom[i]
+  df$soil <- titan_files$soil[i]
+  
+  return(df)
+})
+
+# Combine all results
+titan_all <- bind_rows(titan_list)
+
+cat(sprintf("Loaded %d total taxa from TITAN2 results\n", nrow(titan_all)))
+cat(sprintf("  Bacteria resistant: %d taxa\n", 
+            sum(titan_all$kingdom == "bacteria" & titan_all$soil == "resistant")))
+cat(sprintf("  Bacteria Permissive: %d taxa\n", 
+            sum(titan_all$kingdom == "bacteria" & titan_all$soil == "Permissive")))
+cat(sprintf("  Fungi resistant: %d taxa\n", 
+            sum(titan_all$kingdom == "fungi" & titan_all$soil == "resistant")))
+cat(sprintf("  Fungi Permissive: %d taxa\n", 
+            sum(titan_all$kingdom == "fungi" & titan_all$soil == "Permissive")))
+
+# ============================================================================
+# FILTER TO HIGH-QUALITY INDICATORS
+# ============================================================================
+
+# Keep only taxa that pass TITAN2 filters (purity > 0.95, reliability > 0.95)
+titan_keep <- titan_all %>%
+  filter(
+    filter == 1,  # TITAN2's built-in filter
+    !is.na(ienv.cp),
+    !is.na(zscore),
+    purity > 0.95,
+    reliability > 0.95
+  )
+
+cat(sprintf("\nAfter filtering (purity > 0.95, reliability > 0.95):\n"))
+cat(sprintf("  Total filtered taxa: %d\n", nrow(titan_keep)))
+cat(sprintf("  Bacteria resistant: %d taxa\n", 
+            sum(titan_keep$kingdom == "bacteria" & titan_keep$soil == "resistant")))
+cat(sprintf("  Bacteria Permissive: %d taxa\n", 
+            sum(titan_keep$kingdom == "bacteria" & titan_keep$soil == "Permissive")))
+cat(sprintf("  Fungi resistant: %d taxa\n", 
+            sum(titan_keep$kingdom == "fungi" & titan_keep$soil == "resistant")))
+cat(sprintf("  Fungi Permissive: %d taxa\n", 
+            sum(titan_keep$kingdom == "fungi" & titan_keep$soil == "Permissive")))
+
+# ============================================================================
+# GET BIOMASS RANGE FROM YOUR DATA
+# ============================================================================
+
+# Extract metadata from phyloseq object
+# Adjust this based on how you access your metadata
+metadata_bact <- data.frame(sample_data(physeq_bacteria))
+metadata_fungi <- data.frame(sample_data(physeq_fungi))
+
+# Combine and get biomass range by soil
+biomass_range <- bind_rows(
+  metadata_bact %>% mutate(kingdom = "bacteria"),
+  metadata_fungi %>% mutate(kingdom = "fungi")
+) %>%
+  group_by(soil) %>%
+  summarise(
+    n_samples = n(),
+    biomass_min = min(Dry_wheat_mass, na.rm = TRUE),
+    biomass_max = max(Dry_wheat_mass, na.rm = TRUE),
+    biomass_mean = mean(Dry_wheat_mass, na.rm = TRUE),
+    biomass_median = median(Dry_wheat_mass, na.rm = TRUE),
+    biomass_sd = sd(Dry_wheat_mass, na.rm = TRUE),
+    biomass_q25 = quantile(Dry_wheat_mass, 0.25, na.rm = TRUE),
+    biomass_q75 = quantile(Dry_wheat_mass, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\n=== BIOMASS RANGE BY SOIL ===\n")
+print(biomass_range)
+```
+
+
+
+```{r}
+# ============================================================================
+# VALIDATE CHANGE-POINTS ARE WITHIN BIOMASS RANGE
+# ============================================================================
+
+# Summarize change-point distribution
+cp_summary <- titan_keep %>%
+  group_by(kingdom, soil) %>%
+  summarise(
+    n_taxa = n(),
+    cp_min = min(ienv.cp),
+    cp_q25 = quantile(ienv.cp, 0.25),
+    cp_median = median(ienv.cp),
+    cp_q75 = quantile(ienv.cp, 0.75),
+    cp_max = max(ienv.cp),
+    cp_mean = mean(ienv.cp),
+    cp_sd = sd(ienv.cp),
+    .groups = "drop"
+  )
+
+# Merge with biomass range
+cp_validation <- cp_summary %>%
+  left_join(biomass_range, by = "soil")
+
+cat("\n=== CHANGE-POINT DISTRIBUTION ===\n")
+print(cp_validation %>%
+        select(kingdom, soil, n_taxa, cp_median, cp_min, cp_max, 
+               biomass_median, biomass_min, biomass_max))
+
+# Check for change-points outside biomass range
+extreme_cps <- titan_keep %>%
+  left_join(biomass_range, by = "soil") %>%
+  mutate(
+    outside_range = ienv.cp < biomass_min | ienv.cp > biomass_max,
+    at_extreme = ienv.cp < biomass_q25 | ienv.cp > biomass_q75
+  )
+
+n_outside <- sum(extreme_cps$outside_range)
+n_extreme <- sum(extreme_cps$at_extreme)
+pct_outside <- round(100 * n_outside / nrow(titan_keep), 1)
+pct_extreme <- round(100 * n_extreme / nrow(titan_keep), 1)
+
+cat(sprintf("\n=== VALIDATION SUMMARY ===\n"))
+cat(sprintf("Taxa with CP outside biomass range: %d (%.1f%%)\n", n_outside, pct_outside))
+cat(sprintf("Taxa with CP at extremes (<Q25 or >Q75): %d (%.1f%%)\n", n_extreme, pct_extreme))
+
+if (n_outside > 0) {
+  cat("\nWARNING: Some change-points fall outside observed biomass range:\n")
+  print(extreme_cps %>%
+          filter(outside_range) %>%
+          select(kingdom, soil, taxa, ienv.cp, zscore, biomass_min, biomass_max) %>%
+          head(20))
+} else {
+  cat("\n✓ All change-points fall within observed biomass range\n")
+}
+
+```
+
+```{r}
+# ============================================================================
+# PLOT 1: BIOMASS DISTRIBUTION WITH CHANGE-POINT OVERLAY
+# ============================================================================
+
+# Prepare metadata for plotting
+metadata_all <- bind_rows(
+  metadata_bact %>% mutate(kingdom = "Bacteria"),
+  metadata_fungi %>% mutate(kingdom = "Fungi")
+)
+
+# Calculate median CP for overlay
+cp_medians <- titan_keep %>%
+  group_by(soil, kingdom) %>%
+  summarise(cp_median = median(ienv.cp), .groups = "drop") %>%
+  mutate(kingdom = ifelse(kingdom == "bacteria", "Bacteria", "Fungi"))
+
+# Create plot
+p1 <- ggplot() +
+  # Biomass histogram
+  geom_histogram(data = metadata_all,
+                 aes(x = Dry_wheat_mass, fill = soil),
+                 alpha = 0.4, position = "identity", bins = 30) +
+  # Median change-point lines
+  geom_vline(data = cp_medians,
+             aes(xintercept = cp_median, color = soil),
+             linetype = "dashed", linewidth = 1) +
+  facet_wrap(~kingdom, ncol = 1, scales = "free_y") +
+  scale_fill_manual(
+    values = c("resistant" = "#E41A1C", "Permissive" = "#377EB8"),
+    labels = c("resistant" = "Cereal-dominated", "Permissive" = "Mixed-system")
+  ) +
+  scale_color_manual(
+    values = c("resistant" = "#E41A1C", "Permissive" = "#377EB8"),
+    labels = c("resistant" = "Cereal-dominated", "Permissive" = "Mixed-system")
+  ) +
+  labs(
+    title = "Observed Wheat Biomass Distribution",
+    subtitle = "Dashed lines = median TITAN2 change-point",
+    x = "Wheat Biomass (g)",
+    y = "Number of Samples",
+    fill = "Soil Type",
+    color = "Soil Type"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(p1)
+ggsave(file.path(output_dir, "Fig_biomass_distribution.pdf"), p1, width = 10, height = 8)
+
+```
+
+
+```{r}
+# ============================================================================
+# PLOT 2: CHANGE-POINT DENSITY DISTRIBUTION
+# ============================================================================
+
+# Prepare data with better labels
+titan_plot <- titan_keep %>%
+  mutate(
+    kingdom_label = ifelse(kingdom == "bacteria", "Bacteria", "Fungi"),
+    soil_label = ifelse(soil == "resistant", "Cereal-dominated", "Mixed-system")
+  )
+
+p2 <- ggplot(titan_plot, aes(x = ienv.cp, fill = soil_label)) +
+  geom_density(alpha = 0.6) +
+  geom_vline(data = cp_medians %>%
+               mutate(soil_label = ifelse(soil == "resistant", 
+                                          "Cereal-dominated", "Mixed-system")),
+             aes(xintercept = cp_median, color = soil_label),
+             linetype = "dashed", linewidth = 1) +
+  facet_wrap(~kingdom_label, ncol = 1, scales = "free_y") +
+  scale_fill_manual(
+    values = c("Cereal-dominated" = "#E41A1C", "Mixed-system" = "#377EB8")
+  ) +
+  scale_color_manual(
+    values = c("Cereal-dominated" = "#E41A1C", "Mixed-system" = "#377EB8")
+  ) +
+  labs(
+    title = "Distribution of TITAN2 Change-Points",
+    subtitle = "Dashed lines = median change-point",
+    x = "Change-Point Location (wheat biomass, g)",
+    y = "Density",
+    fill = "Soil Type",
+    color = "Soil Type"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(p2)
+ggsave(file.path(output_dir, "Fig_changepoint_density.pdf"), p2, width = 10, height = 8)
+
+```
+```{r}
+# ============================================================================
+# PLOT 3: COMBINED VALIDATION PLOT
+# ============================================================================
+
+combined_plot <- p1 / p2 +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    tag_levels = "A",
+    title = "TITAN2 Change-Point Validation"
+  ) &
+  theme(legend.position = "bottom")
+
+print(combined_plot)
+ggsave(file.path(output_dir, "FigS_TITAN2_validation.pdf"), 
+       combined_plot, width = 12, height = 12)
+```
+
+```{r}
+# ============================================================================
+# PLOT 4: TRADITIONAL TITAN2 PLOT (Z-SCORE VS CHANGE-POINT)
+# ============================================================================
+
+# Label top taxa per panel
+label_n <- 10
+titan_labels <- titan_plot %>%
+  group_by(soil_label, kingdom_label) %>%
+  slice_max(abs(zscore), n = label_n, with_ties = FALSE) %>%
+  ungroup()
+
+p4 <- ggplot(titan_plot, aes(x = ienv.cp, y = zscore)) +
+  # Median CP line
+  geom_vline(data = cp_medians %>%
+               mutate(soil_label = ifelse(soil == "resistant", 
+                                          "Cereal-dominated", "Mixed-system"),
+                      kingdom_label = kingdom),
+             aes(xintercept = cp_median),
+             linetype = "dotted", color = "gray50", linewidth = 0.5) +
+  # Points
+  geom_point(aes(size = freq, alpha = reliability, color = kingdom_label)) +
+  # Labels
+  geom_text_repel(
+    data = titan_labels,
+    aes(label = taxa, color = kingdom_label),
+    size = 2.5,
+    max.overlaps = 15,
+    box.padding = 0.35,
+    segment.alpha = 0.4,
+    segment.size = 0.3
+  ) +
+  facet_grid(soil_label ~ kingdom_label, scales = "free") +
+  scale_size_continuous(range = c(0.5, 4), name = "Frequency") +
+  scale_alpha_continuous(range = c(0.3, 1), name = "Reliability") +
+  scale_color_manual(
+    values = c("Bacteria" = "#1f77b4", "Fungi" = "#ff7f0e"),
+    guide = "none"
+  ) +
+  labs(
+    title = "TITAN2 Indicator Taxa Response to Wheat Biomass",
+    subtitle = "Point size = frequency; transparency = reliability; dotted line = median change-point",
+    x = "Change-Point along Wheat Biomass Gradient (g)",
+    y = "Response Strength (z-score)"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position = "right",
+    strip.background = element_rect(fill = "gray90"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p4)
+ggsave(file.path(output_dir, "Fig_TITAN2_zscore_vs_changepoint.pdf"), 
+       p4, width = 14, height = 10)
+```
+
+
+
+```{r}
+# Load your metadata
+metadata <- data.frame(sample_data(physeq_bacteria))
+
+# Summary statistics
+cat("=== BIOMASS DISTRIBUTION ===\n")
+summary(metadata$Dry_wheat_mass)
+
+# Calculate quantiles
+quantiles <- quantile(metadata$Dry_wheat_mass, 
+                      probs = c(0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95),
+                      na.rm = TRUE)
+print(quantiles)
+
+# Check how many samples in change-point range (0.05-0.15 g)
+cp_range <- metadata %>%
+  mutate(
+    in_cp_range = Dry_wheat_mass >= 0.05 & Dry_wheat_mass <= 0.15,
+    below_median = Dry_wheat_mass < median(Dry_wheat_mass, na.rm = TRUE)
+  ) %>%
+  summarise(
+    total = n(),
+    in_cp_range = sum(in_cp_range, na.rm = TRUE),
+    pct_in_cp_range = 100 * sum(in_cp_range, na.rm = TRUE) / n(),
+    below_median = sum(below_median, na.rm = TRUE),
+    pct_below_median = 100 * sum(below_median, na.rm = TRUE) / n()
+  )
+
+cat("\n=== SAMPLES IN CHANGE-POINT RANGE (0.05-0.15 g) ===\n")
+print(cp_range)
+
+# Visualize
+ggplot(metadata, aes(x = Dry_wheat_mass)) +
+  geom_histogram(bins = 50, fill = "gray60", color = "black") +
+  geom_vline(xintercept = 0.07, color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = 0.09, color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = median(metadata$Dry_wheat_mass, na.rm = TRUE), 
+             color = "blue", linetype = "dashed", linewidth = 1) +
+  annotate("text", x = 0.08, y = Inf, label = "TITAN2 CPs", 
+           vjust = 1.5, color = "red", size = 4) +
+  annotate("text", x = median(metadata$Dry_wheat_mass, na.rm = TRUE), y = Inf, 
+           label = "Median", vjust = -0.5, color = "blue", size = 4) +
+  labs(title = "Biomass Distribution with TITAN2 Change-Points",
+       x = "Wheat Biomass (g)", y = "Number of Samples") +
+  theme_bw()
+```
+
+
+```{r}
+# Load your metadata
+metadata <- data.frame(sample_data(physeq_fungi))
+
+# Summary statistics
+cat("=== BIOMASS DISTRIBUTION ===\n")
+summary(metadata$Dry_wheat_mass)
+
+# Calculate quantiles
+quantiles <- quantile(metadata$Dry_wheat_mass, 
+                      probs = c(0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95),
+                      na.rm = TRUE)
+print(quantiles)
+
+# Check how many samples in change-point range (0.05-0.15 g)
+cp_range <- metadata %>%
+  mutate(
+    in_cp_range = Dry_wheat_mass >= 0.05 & Dry_wheat_mass <= 0.15,
+    below_median = Dry_wheat_mass < median(Dry_wheat_mass, na.rm = TRUE)
+  ) %>%
+  summarise(
+    total = n(),
+    in_cp_range = sum(in_cp_range, na.rm = TRUE),
+    pct_in_cp_range = 100 * sum(in_cp_range, na.rm = TRUE) / n(),
+    below_median = sum(below_median, na.rm = TRUE),
+    pct_below_median = 100 * sum(below_median, na.rm = TRUE) / n()
+  )
+
+cat("\n=== SAMPLES IN CHANGE-POINT RANGE (0.05-0.15 g) ===\n")
+print(cp_range)
+
+# Visualize
+ggplot(metadata, aes(x = Dry_wheat_mass)) +
+  geom_histogram(bins = 50, fill = "gray60", color = "black") +
+  geom_vline(xintercept = 0.07, color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = 0.09, color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = median(metadata$Dry_wheat_mass, na.rm = TRUE), 
+             color = "blue", linetype = "dashed", linewidth = 1) +
+  annotate("text", x = 0.08, y = Inf, label = "TITAN2 CPs", 
+           vjust = 1.5, color = "red", size = 4) +
+  annotate("text", x = median(metadata$Dry_wheat_mass, na.rm = TRUE), y = Inf, 
+           label = "Median", vjust = -0.5, color = "blue", size = 4) +
+  labs(title = "Biomass Distribution with TITAN2 Change-Points",
+       x = "Wheat Biomass (g)", y = "Number of Samples") +
+  theme_bw()
+```
+
+
+How to Characterize the High-Biomass Responses
+
+mypath <- "/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat/paper_1/data/results_v4/"
+
+
+```{r}
+# Reload TITAN2 data
+titan_keep <- titan_all %>%
+  filter(filter == 1, purity > 0.95, reliability > 0.95,
+         !is.na(ienv.cp), !is.na(zscore))
+
+# Split into low-biomass vs high-biomass indicators
+titan_classified <- titan_keep %>%
+  mutate(
+    cp_category = case_when(
+      ienv.cp < 0.15 ~ "Low biomass (<0.15g) - Stress transition",
+      ienv.cp >= 0.15 & ienv.cp < 0.35 ~ "Mid biomass (0.15-0.35g) - Moderate range",
+      ienv.cp >= 0.35 ~ "High biomass (≥0.35g) - Growth-promoting range"
+    )
+  )
+
+# Count indicators in each range
+cp_summary <- titan_classified %>%
+  group_by(kingdom, soil, cp_category) %>%
+  summarise(
+    n_taxa = n(),
+    mean_zscore = mean(zscore),
+    taxa_list = paste(head(taxa, 5), collapse = ", "),
+    .groups = "drop"
+  )
+
+cat("=== CHANGE-POINT DISTRIBUTION BY BIOMASS RANGE ===\n")
+print(cp_summary)
+
+# Identify high-biomass indicators
+high_biomass_indicators <- titan_classified %>%
+  filter(ienv.cp >= 0.35) %>%
+  arrange(desc(zscore))
+
+
+high_biomass_indicators
+
+write.csv(high_biomass_indicators, file = paste(mypath, "TITAN_Full_Dataset/high_biomass_indicators.csv", sep=""), row.names = TRUE)  # Set row.names to FALSE if you don't want to save row names
+
+
+cat("\n=== TOP HIGH-BIOMASS INDICATORS ===\n")
+print(high_biomass_indicators %>%
+        select(kingdom, soil, taxa, ienv.cp, zscore, freq, reliability) %>%
+        head(20))
+
+# Visualize the three ranges
+ggplot(titan_classified, aes(x = ienv.cp, fill = cp_category)) +
+  geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
+  facet_grid(soil ~ kingdom) +
+  scale_fill_manual(
+    values = c("Low biomass (<0.15g) - Stress transition" = "#d62728",
+               "Mid biomass (0.15-0.35g) - Moderate range" = "#ff7f0e",
+               "High biomass (≥0.35g) - Growth-promoting range" = "#2ca02c")
+  ) +
+  labs(title = "TITAN2 Change-Points Across Biomass Range",
+       x = "Change-Point (g)", y = "Number of Taxa",
+       fill = "Biomass Category") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(output_dir, "Fig_TITAN2_biomass_categories.pdf"),
+       width = 12, height = 8)
+```
+
+
+1. Panel A: TITAN2 Figure
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+
+# ============================================================================
+# PANEL A: TITAN2 THRESHOLD INDICATORS (BOTH KINGDOMS)
+# ============================================================================
+
+# Assuming you already have:
+# - titan_all: combined TITAN2 results from all soils/kingdoms
+# - cp_medians: median change-points per soil/kingdom
+
+# Classify by biomass category
+titan_plot <- titan_all %>%
+  filter(filter == 1, purity > 0.95, reliability > 0.95) %>%
+  mutate(
+    biomass_category = case_when(
+      ienv.cp < 0.15 ~ "Low biomass (<0.15g)",
+      ienv.cp >= 0.15 & ienv.cp < 0.35 ~ "Mid biomass (0.15-0.35g)",
+      ienv.cp >= 0.35 ~ "High biomass (≥0.35g)"
+    ),
+    biomass_category = factor(
+      biomass_category,
+      levels = c("Low biomass (<0.15g)", 
+                 "Mid biomass (0.15-0.35g)", 
+                 "High biomass (≥0.35g)")
+    ),
+    soil_label = ifelse(soil == "resistant", "Cereal-dominated", "Mixed-system"),
+    kingdom_label = tools::toTitleCase(kingdom)
+  )
+
+# Strategic labeling - label ALL green/orange fungi since they're rare
+# For bacteria, label top 5 per category
+titan_labels <- titan_plot %>%
+  group_by(soil, kingdom, biomass_category) %>%
+  mutate(
+    should_label = case_when(
+      # For fungi: label ALL mid and high biomass points (very few)
+      kingdom == "fungi" & biomass_category %in% c("High biomass (≥0.35g)", 
+                                                     "Mid biomass (0.15-0.35g)") ~ TRUE,
+      # For bacteria: label top 5 by z-score per category
+      kingdom == "bacteria" ~ rank(-abs(zscore)) <= 5,
+      TRUE ~ FALSE
+    )
+  ) %>%
+  filter(should_label) %>%
+  ungroup()
+
+# Create plot
+panel_A <- ggplot(titan_plot, aes(x = ienv.cp, y = zscore)) +
+  # Median CP line
+  geom_vline(
+    data = cp_medians %>%
+      mutate(soil_label = ifelse(soil == "resistant", 
+                                  "Cereal-dominated", "Mixed-system"),
+             kingdom_label = tools::toTitleCase(kingdom)),
+    aes(xintercept = cp_median),
+    linetype = "dotted", color = "gray50", linewidth = 0.5
+  ) +
+  # Points colored by biomass category
+  geom_point(aes(size = freq, alpha = reliability, color = biomass_category)) +
+  # Labels
+  geom_text_repel(
+    data = titan_labels,
+    aes(label = taxa, color = biomass_category),
+    size = 2.2,
+    max.overlaps = 25,
+    box.padding = 0.3,
+    segment.alpha = 0.4,
+    segment.size = 0.3,
+    force = 1.5,
+    min.segment.length = 0
+  ) +
+  # Facet: kingdom (rows) × soil (columns)
+  facet_grid(kingdom_label ~ soil_label, scales = "free") +
+  scale_size_continuous(range = c(0.5, 4), name = "Frequency") +
+  scale_alpha_continuous(range = c(0.3, 1), name = "Reliability") +
+  scale_color_manual(
+    name = "Biomass Category",
+    values = c(
+      "Low biomass (<0.15g)" = "#d62728",
+      "Mid biomass (0.15-0.35g)" = "#ff7f0e",
+      "High biomass (≥0.35g)" = "#2ca02c"
+    )
+  ) +
+  labs(
+    x = "Change-Point along Wheat Biomass Gradient (g)",
+    y = "Response Strength (z-score)"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    legend.position = "right",
+    legend.key.size = unit(0.4, "cm"),
+    strip.background = element_rect(fill = "gray90", color = "black"),
+    strip.text = element_text(size = 10, face = "bold"),
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(size = 11, face = "bold")
+  )
+
+# Save
+ggsave(
+  file.path(output_dir, "Panel_A_TITAN2.pdf"), 
+  panel_A, 
+  width = 10, 
+  height = 8, 
+  dpi = 300
+)
+
+print("Panel A saved successfully!")
+```
+
+
+2. Panel B: mEQO Data Import and Visualization (R Code)
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+
+# ============================================================================
+# LOAD mEQO DATA FOR BACTERIA AND FUNGI
+# ============================================================================
+
+eqo_folder <- file.path(mypath_res, "mEQO")
+
+# Function to load and prepare mEQO data
+load_meqo_data <- function(soil_letter, kingdom) {
+  # Read files
+  module_abundance <- read.csv(
+    file.path(eqo_folder, sprintf("eqo_module_soil%s_abundance_%s.csv", 
+                                  soil_letter, kingdom)),
+    row.names = 1
+  )
+  
+  dry_mass <- read.csv(
+    file.path(eqo_folder, sprintf("dry_mass_soil%s_%s.csv", 
+                                  soil_letter, kingdom))
+  )
+  
+  # Combine
+  df <- data.frame(
+    Module_Abundance = module_abundance[, 1],
+    Wheat_Biomass = dry_mass[, ncol(dry_mass)]  # Last column is biomass
+  )
+  
+  # Add metadata
+  df$Soil <- ifelse(soil_letter == "A", "Cereal-dominated", "Mixed-system")
+  df$Kingdom <- tools::toTitleCase(kingdom)
+  
+  return(df)
+}
+
+# Load all combinations
+bacteria_soilA <- load_meqo_data("A", "bacteria")
+bacteria_soilB <- load_meqo_data("B", "bacteria")
+fungi_soilA <- load_meqo_data("A", "fungi")
+fungi_soilB <- load_meqo_data("B", "fungi")
+
+# Combine
+bacteria_data <- rbind(bacteria_soilA, bacteria_soilB)
+fungi_data <- rbind(fungi_soilA, fungi_soilB)
+
+# ============================================================================
+# CALCULATE CORRELATIONS
+# ============================================================================
+
+# Bacteria
+bacteria_stats <- bacteria_data %>%
+  group_by(Soil) %>%
+  summarise(
+    rho = cor(Wheat_Biomass, Module_Abundance, method = "spearman"),
+    p_value = cor.test(Wheat_Biomass, Module_Abundance, 
+                       method = "spearman")$p.value,
+    r2 = summary(lm(Module_Abundance ~ Wheat_Biomass))$r.squared,
+    .groups = "drop"
+  )
+
+# Fungi
+fungi_stats <- fungi_data %>%
+  group_by(Soil) %>%
+  summarise(
+    rho = cor(Wheat_Biomass, Module_Abundance, method = "spearman"),
+    p_value = cor.test(Wheat_Biomass, Module_Abundance, 
+                       method = "spearman")$p.value,
+    r2 = summary(lm(Module_Abundance ~ Wheat_Biomass))$r.squared,
+    .groups = "drop"
+  )
+
+print("Bacteria correlations:")
+print(bacteria_stats)
+
+print("Fungi correlations:")
+print(fungi_stats)
+
+# ============================================================================
+# CREATE mEQO PLOTS
+# ============================================================================
+
+# Color scheme
+soil_colors <- c("Cereal-dominated" = "#E41A1C", "Mixed-system" = "#377EB8")
+
+# Create annotation text
+bacteria_annotation <- sprintf(
+  "R² = %.2f-%.2f\nρ = %.2f-%.2f",
+  min(bacteria_stats$r2), max(bacteria_stats$r2),
+  min(bacteria_stats$rho), max(bacteria_stats$rho)
+)
+
+fungi_annotation <- sprintf(
+  "R² = %.2f-%.2f\nρ = %.2f-%.2f",
+  min(fungi_stats$r2), max(fungi_stats$r2),
+  min(fungi_stats$rho), max(fungi_stats$rho)
+)
+
+# Bacteria plot
+plot_bacteria <- ggplot(bacteria_data, 
+                        aes(x = Wheat_Biomass, y = Module_Abundance, color = Soil)) +
+  geom_point(alpha = 0.5, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, linewidth = 1) +
+  scale_color_manual(values = soil_colors) +
+  annotate("text", 
+           x = Inf, y = Inf,
+           label = bacteria_annotation,
+           size = 3, hjust = 1.1, vjust = 1.5,
+           fontface = "italic") +
+  labs(
+    x = NULL,
+    y = "mEQO Module Abundance",
+    subtitle = "Bacteria"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(face = "bold", hjust = 0.5)
+  )
+
+# Fungi plot
+plot_fungi <- ggplot(fungi_data, 
+                     aes(x = Wheat_Biomass, y = Module_Abundance, color = Soil)) +
+  geom_point(alpha = 0.5, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, linewidth = 1) +
+  scale_color_manual(values = soil_colors, name = "Soil Type") +
+  annotate("text", 
+           x = Inf, y = Inf,
+           label = fungi_annotation,
+           size = 3, hjust = 1.1, vjust = 1.5,
+           fontface = "italic") +
+  labs(
+    x = NULL,
+    y = "mEQO Module Abundance",
+    subtitle = "Fungi"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 9, face = "bold"),
+    legend.text = element_text(size = 8),
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(face = "bold", hjust = 0.5)
+  )
+
+# Combine
+panel_B <- plot_bacteria + plot_fungi +
+  plot_layout(ncol = 2) +
+  plot_annotation(
+    caption = "Wheat Biomass (g)",
+    theme = theme(plot.caption = element_text(size = 11, hjust = 0.5, 
+                                              face = "bold", vjust = -1))
+  )
+
+# Save
+ggsave(
+  file.path(output_dir, "Panel_B_mEQO.pdf"), 
+  panel_B, 
+  width = 10, 
+  height = 5, 
+  dpi = 300
+)
+
+print("Panel B saved successfully!")
+```
+
+
+3. Panel C: Summary Bar Chart 
+
+```{r}
+# ============================================================================
+# PANEL C: SUMMARY STATISTICS
+# ============================================================================
+
+# Create summary data
+summary_data <- data.frame(
+  Kingdom = rep(c("Bacteria", "Fungi"), each = 2),
+  Soil = rep(c("Cereal-dominated", "Mixed-system"), 2),
+  Total_Indicators = c(437, 437, 116, 116),
+  High_Biomass = c(15, 25, 1, 1)
+) %>%
+  mutate(
+    Pct_High_Biomass = 100 * High_Biomass / Total_Indicators
+  )
+
+panel_C <- ggplot(summary_data, 
+                  aes(x = Kingdom, y = Pct_High_Biomass, fill = Soil)) +
+  geom_col(position = position_dodge(width = 0.8), 
+           width = 0.7, color = "black", linewidth = 0.5) +
+  geom_text(
+    aes(label = sprintf("%.1f%%\n(n=%d)", Pct_High_Biomass, High_Biomass)),
+    position = position_dodge(width = 0.8),
+    vjust = -0.3, size = 3.5, fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = c("Cereal-dominated" = "#E41A1C", "Mixed-system" = "#377EB8"),
+    name = "Soil Type"
+  ) +
+  scale_y_continuous(limits = c(0, 25), expand = c(0, 0)) +
+  labs(
+    x = NULL,
+    y = "High-Biomass Indicators\n(% of total)",
+    title = "Proportion of Growth-Promoting Indicators"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+    axis.title.y = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(size = 10, face = "bold")
+  )
+
+# Save
+ggsave(
+  file.path(output_dir, "Panel_C_summary.pdf"), 
+  panel_C, 
+  width = 6, 
+  height = 5, 
+  dpi = 300
+)
+```
+
+```{r}
+library(patchwork)
+
+# ============================================================================
+# COMBINE ALL PANELS INTO FINAL FIGURE 4
+# ============================================================================
+
+# Option 1: Full 3-panel figure
+combined_figure_full <- panel_A / panel_B / panel_C +
+  plot_layout(heights = c(3, 1.5, 1)) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_suffix = '.',
+    theme = theme(plot.tag = element_text(size = 14, face = "bold"))
+  )
+
+ggsave(
+  file.path(output_dir, "Fig4_complete_multi_kingdom.pdf"), 
+  combined_figure_full, 
+  width = 12, 
+  height = 14, 
+  dpi = 300
+)
+
+# Option 2: Streamlined 2-panel (just TITAN2 + mEQO)
+combined_figure_streamlined <- panel_A / panel_B +
+  plot_layout(heights = c(2.5, 1)) +
+  plot_annotation(
+    tag_levels = 'A',
+    tag_suffix = '.',
+    theme = theme(plot.tag = element_text(size = 14, face = "bold"))
+  )
+
+ggsave(
+  file.path(output_dir, "Fig4_streamlined.pdf"), 
+  combined_figure_streamlined, 
+  width = 12, 
+  height = 11, 
+  dpi = 300
+)
+
+print(sprintf("Output directory: %s", output_dir))
+```
