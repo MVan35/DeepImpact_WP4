@@ -1,0 +1,649 @@
+---
+title: "Neighbouring weed species influence the root microbiota and growth of wheat"
+subtitle: "R analyses (run first; figures are drawn by Paper_figures.ipynb)"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  cache: true
+---
+
+Sections follow the manuscript. Each heading names the display items it produces; every number in the
+paper is written by a chunk here (to `results/`) or by the companion notebook.
+
+| | |
+|---|---|
+| R | ≥ 4.2: `phyloseq`, `vegan`, `dplyr`, `ggplot2`, `patchwork`, `car`, `edgeR`, `DESeq2`, `metagenomeSeq`, `TITAN2`, `ape` (`V.PhyloMaker2` optional: the tree is supplied) |
+| Data | the Zenodo data deposit (unpacked folder `data/`); set `PAPER_DATA` to its path, or keep the default `submission/data` |
+| Modules | the `.R` files of this folder, next to this document |
+| Runtime | c. 30 min, mostly TITAN2 and the permutation tests |
+
+Run order: this document, then `Paper_figures.ipynb`.
+
+# Setup
+
+```{r paths}
+library(phyloseq); library(vegan); library(dplyr); library(ggplot2)
+
+## The project root. Everything else is derived from it, so this is the only
+## line to change on another machine.
+PROJECT    <- Sys.getenv("PAPER_PROJECT", "/Users/mathieuvanhove/Desktop/Work/DeepImpact/Weeds_wheat")
+SUBMISSION <- file.path(PROJECT, "submission")
+
+## Everything the analysis reads lives under submission/data, staged by
+## stage_submission_data.sh, which mirrors the layout of paper_1/data. Point
+## DATA_DIR at the original tree instead and it still works -- the layout is
+## the same -- but the staged copy is what the submission ships, and it carries
+## the harmonised species names.
+DATA_DIR   <- Sys.getenv("PAPER_DATA", file.path(SUBMISSION, "data"))   # or the unpacked Zenodo data deposit
+RES_DIR    <- file.path(DATA_DIR, "results_v4")
+MATRIX_DIR <- file.path(DATA_DIR, "matrice_phase1", "df")
+META_DIR   <- file.path(DATA_DIR, "df")
+OUT_DIR    <- Sys.getenv("PAPER_OUT", file.path(SUBMISSION, "results"))   # where every result is written
+
+TITAN_DIR <- file.path(RES_DIR, "TITAN_Full_Dataset")
+MEQO_DIR  <- file.path(RES_DIR, "mEQO")   # optional, legacy (mEQO is not used in the paper)
+
+## Differential abundance: BOTH roots, and this is deliberate. The same
+## filenames exist under data/<method>_species/ and results_v4/<method>_species/
+## and they are different runs -- for edgeR the complete file (the one that
+## actually contains the wheat x wheat contrast) is in a different root for
+## each soil. da_resolve() in da_codetection.R picks per file by checking which
+## copy contains the control; a fixed root reproduces one soil and breaks the
+## other. DA_SEARCH is the ordered list it searches.
+DA_SEARCH <- c(DATA_DIR, RES_DIR)
+DA_DIRS   <- file.path(rep(DA_SEARCH, each = 3),
+                       c("DESeq2_species", "edgeR_species",
+                         "metagenomeSeq_species"))
+
+mypath_res <- RES_DIR
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+## Name every missing input NOW rather than three calls deep inside a loader.
+for (d in c(DATA_DIR, RES_DIR, MATRIX_DIR, TITAN_DIR, DA_DIRS))
+  cat(sprintf("  %-8s %s\n", if (dir.exists(d)) "OK" else "MISSING",
+              sub(PROJECT, "<project>", d, fixed = TRUE)))
+if (!dir.exists(DATA_DIR))
+  stop("Data folder not found. Download and unpack the Zenodo data deposit and set PAPER_DATA to it, or run:\n  bash stage_submission_data.sh\n",
+       "It copies every input this document reads and writes the harmonised ",
+       "metadata.", call. = FALSE)
+stopifnot(all(dir.exists(c(DATA_DIR, RES_DIR, MATRIX_DIR, TITAN_DIR))))
+
+## Stand-alone R scripts called with Rscript (Table 1 order check, within-soil effects and Fig. 4 tests, traits)
+CODE_DIR <- getwd()
+run_script <- function(script, ...) {
+  st <- system2(file.path(R.home("bin"), "Rscript"), c(file.path(CODE_DIR, script), shQuote(c(...))), stdout = TRUE, stderr = TRUE)
+  if (!is.null(attr(st, "status")) && attr(st, "status") != 0) stop(paste(st, collapse = "\n"))
+  invisible(st)
+}
+SUPP_DIR <- file.path(OUT_DIR, "supporting"); dir.create(SUPP_DIR, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r parameters}
+## ---------------------------------------------------------------------------
+## Every threshold in the paper, in one place. These MUST match the Methods.
+## ---------------------------------------------------------------------------
+PREV_MIN  <- 0.10        # taxon present in >= 10% of pots
+ABUND_MIN <- 1e-4        # mean relative abundance >= 0.01%
+MAX_TAXA  <- 200         # candidate-pool cap (search cost; Methods 2.6.2)
+KFOLD     <- 5           # cross-validation folds
+NPERM     <- 999         # PERMANOVA permutations
+NPERM_NULL <- 50         # quick shuffled-biomass null inside table_s7(); the reported null (999 runs) is in 3.2.2
+CP_MIN    <- 0.35        # TITAN2 change point (g) defining "high-biomass"
+PURITY    <- 0.95        # inclusive (>=), as in Methods 2.6.2
+RELIAB    <- 0.95
+MIN_POTS  <- 3           # species with fewer pots excluded from species means
+RESP      <- "Dry_wheat_mass"
+DA_CONTROL <- "wheat x wheat"
+
+SOILS    <- c(cereal = "resistant", mixed = "Permissive")  # metadata codes
+SOILKEY  <- c(cereal = "soilA",     mixed = "soilB")       # export filenames
+SOILNAME <- c(cereal = "Cereal-dominated (AF193)",
+              mixed  = "Mixed-system (AF190)")
+
+set.seed(20260917)   # fixed before any stochastic step
+```
+
+```{r load-data}
+## The two community objects, built from the deposited tables. There are no
+## serialised .rds objects in the project, so they are assembled here -- which
+## is better for a reader anyway: the object's provenance is visible.
+##
+## The abundance tables are already rarefied (Methods: 7,000 bacterial and
+## them to physeq_bacteria_raw / physeq_fungi_raw before 3.1.1: the normalisation
+## sensitivity check needs them, and you cannot un-rarefy.
+##
+build_physeq <- function(otu_f, tax_f, meta_f) {
+  otu  <- read.delim(file.path(MATRIX_DIR, otu_f),  row.names = 1, check.names = FALSE)
+  tax  <- read.delim(file.path(MATRIX_DIR, tax_f),  row.names = 1, check.names = FALSE)
+  meta <- read.csv(  file.path(MATRIX_DIR, meta_f), check.names = FALSE)
+  stopifnot(ncol(otu) > 1)          # a 1-column matrix means the wrong delimiter
+  rownames(meta) <- meta$sample
+  keep <- intersect(colnames(otu), rownames(meta))
+  phyloseq(otu_table(as.matrix(otu[, keep]), taxa_are_rows = TRUE),
+           tax_table(as.matrix(tax[rownames(otu), , drop = FALSE])),
+           sample_data(meta[keep, , drop = FALSE]))
+}
+physeq_bacteria <- build_physeq("otu_bacteria_table_R_1314ASVs.csv",
+                                "tax_bacteria_R_1314ASVs.csv",
+                                "metadata_bacteria_1314ASVs.csv")
+physeq_fungi    <- build_physeq("otu_fungi_table_R_647ASVs.csv",
+                                "tax_fungi_R_647ASVs.csv",
+                                "metadata_fungi_647ASVs.csv")
+
+## as.data.frame() on a phyloseq sample_data object returns something that
+## still carries the S4 class, and adonis2() rejects it with
+##   Error in terms.formula(formula, data = data): 'data' argument is of the
+##   wrong type
+## as(x, "data.frame") strips the class properly. data.frame() also works.
+metadata_bacteria <- as(sample_data(physeq_bacteria), "data.frame")
+metadata_fungi    <- as(sample_data(physeq_fungi),    "data.frame")
+stopifnot(identical(class(metadata_bacteria), "data.frame"))
+
+## Harmonise the three superseded binomials in the bacterial metadata onto the
+## metadata (all 30 per-species replicate counts match exactly, against 5 of 30
+## for the alternative soil pairing), and after this substitution the bacterial
+## and fungal species sets are identical.
+SYNONYMS <- c("Centaurea cyanus"    = "Cyanus segetum",
+              "Festuca arundinacea" = "Lolium arundinaceum",
+              "Bromus sterilis"     = "Anisantha sterilis",
+              ## two wrong Poaceae labels in the DESeq2 / metagenomeSeq / old edgeR exports
+              ## (row counts and raw-abundance correlation; da_consensus.py label check).
+              ## Absent from the metadata, so harmless there.
+              "Festuca myuros"      = "Lolium arundinaceum",
+              "Viola arvensis"      = "Vulpia myuros")
+for (m in c("metadata_bacteria", "metadata_fungi")) {
+  d <- get(m); hit <- d$species %in% names(SYNONYMS)
+  d$species[hit] <- SYNONYMS[d$species[hit]]
+  d$species <- factor(d$species)
+  assign(m, d)
+}
+sample_data(physeq_bacteria)$species <- metadata_bacteria$species
+sample_data(physeq_fungi)$species    <- metadata_fungi$species
+stopifnot(setequal(levels(metadata_bacteria$species),
+                   levels(metadata_fungi$species)))
+
+cat(sprintf("bacteria: %d taxa x %d samples\nfungi:    %d taxa x %d samples\n",
+            ntaxa(physeq_bacteria), nsamples(physeq_bacteria),
+            ntaxa(physeq_fungi), nsamples(physeq_fungi)))
+```
+
+```{r load-modules}
+## One implementation per analysis. Each file was tested against the real data;
+## none duplicates another.
+for (f in c("validity_checks.R",        # PERMANOVA assumptions
+            "robustness_and_tables.R",  # CLR robustness, Table 1
+            "variance_partition_plot.R",# Fig 1 partition panel
+            "candidate_pool.R",         # eligible set (prevalence, abundance)
+            "table_s5_biomass_taxa.R",  # Table S7 (TITAN2 indicators)
+            "da_codetection.R",         # split_comparison() for the orientation check
+            "edger_export.R"))          # edgeR contrasts for Fig. 2 and Table S3
+  source(f)
+cat("modules loaded\n")
+
+```
+
+# 3.1 Drivers of wheat root microbiota composition
+
+## 3.1.1 Community composition and assembly
+
+### Table 1, Fig. 1b: sequential PERMANOVA
+
+```{r table-1}
+bacteria_bray <- phyloseq::distance(physeq_bacteria, "bray")
+fungi_bray    <- phyloseq::distance(physeq_fungi,    "bray")
+
+set.seed(1)
+bacteria_sequential <- adonis2(bacteria_bray ~ soil * species,
+                               data = metadata_bacteria,
+                               permutations = NPERM, by = "terms")
+set.seed(1)
+fungi_sequential    <- adonis2(fungi_bray ~ soil * species,
+                               data = metadata_fungi,
+                               permutations = NPERM, by = "terms")
+
+tab1 <- permanova_table(list(`Bacteria (rpoB)` = bacteria_sequential,
+                             `Fungi (ITS1)`    = fungi_sequential))
+write.csv(tab1, file.path(OUT_DIR, "Table1_variance_partition.csv"),
+          row.names = FALSE)
+permanova_table_pretty(tab1, nperm = NPERM)
+```
+
+```{r fig-1b-partition}
+## The partition percentages the Fig. 1 panel and the graphical abstract use.
+## Written to CSV so the figure cannot drift from the table above.
+## partition_from_adonis(bact_fit, fung_fit, labels) takes the two fits
+## POSITIONALLY. Wrapping them in a list() passes one argument where two are
+## expected, and the failure surfaces far from the cause as
+##   arguments imply differing number of rows: 1, 4, 0
+part <- partition_from_adonis(bacteria_sequential, fungi_sequential)
+write.csv(part, file.path(OUT_DIR, "variance_partition.csv"), row.names = FALSE)
+part
+```
+
+### Methods S2: order-independence of Table 1
+
+```{r table-1-order}
+run_script("permanova_order.R", MATRIX_DIR, file.path(SUPP_DIR, "permanova_order_check.csv"))
+knitr::kable(read.csv(file.path(SUPP_DIR, "permanova_order_check.csv")), digits = 4)
+```
+
+### Table 1 (within each soil), Fig. S6 tests and the Fig. 4 tests
+
+```{r revision-analyses}
+## revision_analyses.R: adonis2 of species within each soil (Methods S2); db-RDA of species-centroid
+## composition on species-mean wheat biomass with conditional versions (Fig. 4, Results 3.2.2, Methods S3);
+## per-taxon Spearman screen at the same unit; Glomeromycota tests (Fig. S6). 9,999 permutations, c. 3 min.
+REV_DIR <- file.path(SUPP_DIR, "revision")
+if (!file.exists(file.path(REV_DIR, "fig4_direct_test.csv"))) run_script("revision_analyses.R", MATRIX_DIR, REV_DIR, 9999)
+knitr::kable(read.csv(file.path(REV_DIR, "table1_within_soil.csv")), digits = 3)
+knitr::kable(read.csv(file.path(REV_DIR, "figS6_glomeromycota_tests.csv")), digits = 4)
+```
+
+### Methods S2: assumptions and normalisation
+
+```{r permanova-checks}
+vb <- run_validity_checks(physeq_bacteria, "Bacteria (rpoB)",
+                          ps_raw = if (exists("physeq_bacteria_raw"))
+                                     physeq_bacteria_raw else NULL,
+                          depth = 7000)
+vf <- run_validity_checks(physeq_fungi, "Fungi (ITS1)",
+                          ps_raw = if (exists("physeq_fungi_raw"))
+                                     physeq_fungi_raw else NULL,
+                          depth = 2000)
+print_validity(vb); print_validity(vf)
+```
+
+```{r normalisation}
+## The compositional objection: does the partition survive a compositional
+## distance (CLR / Aitchison) instead of Bray-Curtis on rarefied counts?
+##
+## compare_normalisations(ps, label, ...) takes ONE community object plus a
+## character label -- not both objects. Passing the second object as `label`
+## satisfies the arity, so there is no argument error; it fails much later with
+##   rep(value, length.out = nrows): attempt to replicate an object of type 'S4'
+## when the label is assigned into a data-frame column. Run it per kingdom.
+cmp <- list(
+  bacteria = compare_normalisations(physeq_bacteria, "Bacteria (rpoB)",
+                                    permutations = NPERM),
+  fungi    = compare_normalisations(physeq_fungi,    "Fungi (ITS1)",
+                                    permutations = NPERM))
+
+## report_normalisation() takes one result, so map over them.
+invisible(lapply(cmp, report_normalisation))
+
+## Write the long form of both -- $wide is the display table, $long carries
+## every term x normalisation row the objection needs to be answerable.
+norm_long <- do.call(rbind, lapply(cmp, `[[`, "long"))
+write.csv(norm_long, file.path(OUT_DIR, "normalisation_sensitivity.csv"),
+          row.names = FALSE)
+data.frame(kingdom    = sapply(cmp, `[[`, "label"),
+           max_shift_pp = sapply(cmp, `[[`, "max_shift"),
+           zero_replacement = sapply(cmp, `[[`, "zero_replacement"),
+           row.names  = NULL)
+```
+
+### Fig. S4: multivariate dispersion (PERMDISP)
+
+```{r fig-s4-permdisp, fig.width = 7.2, fig.height = 6.4}
+set.seed(20260917)   # permutest() draws permutations: fix them per chunk
+## PERMDISP: is a PERMANOVA 'location' effect really a difference in spread?
+## betadisper() places every sample in PCoA space (Bray-Curtis, negative
+## eigenvalues handled by vegan), takes its distance to the SPATIAL MEDIAN of its
+## group (type = "median", the vegan default and what the Results state), and
+## an ANOVA on those distances is tested by permutation (permutest, 999).
+## Both factors of Table 1 are tested, soil and neighbour species, in both
+## kingdoms: Fig. S4 shows all four.
+SOIL_COL <- c("Cereal-dominated (AF193)" = "#4C6E9E",   # same palette as Fig. 1 / Fig. S7
+              "Mixed-system (AF190)"     = "#C4713A")
+permdisp_one <- function(ps, kingdom, factor) {
+  meta <- as(sample_data(ps), "data.frame")
+  D    <- vegan::vegdist(t(as(otu_table(ps), "matrix")), method = "bray")
+  g    <- if (factor == "soil") factor(SOILNAME[match(meta$soil, SOILS)], levels = SOILNAME)
+          else droplevels(factor(meta$species))
+  bd   <- vegan::betadisper(D, g, type = "median")
+  pt   <- vegan::permutest(bd, permutations = NPERM)
+  tab  <- pt$tab
+  list(test = data.frame(kingdom = kingdom, factor = factor,
+                         df1 = tab$Df[1], df2 = tab$Df[2], F = tab$F[1],
+                         p_perm = tab$`Pr(>F)`[1], n = length(g)),
+       dist = data.frame(kingdom = kingdom, factor = factor, sample = rownames(meta),
+                         group = as.character(g), soil = SOILNAME[match(meta$soil, SOILS)],
+                         distance = as.numeric(bd$distances)))
+}
+pd_res <- list(); k <- 0
+for (kg in c("bacteria", "fungi")) {
+  ps <- if (kg == "bacteria") physeq_bacteria else physeq_fungi
+  for (fc in c("soil", "species")) { k <- k + 1; pd_res[[k]] <- permdisp_one(ps, kg, fc) }
+}
+permdisp_tests <- do.call(rbind, lapply(pd_res, `[[`, "test"))
+permdisp_dist  <- do.call(rbind, lapply(pd_res, `[[`, "dist"))
+write.csv(permdisp_tests, file.path(OUT_DIR, "permdisp_tests.csv"), row.names = FALSE)
+write.csv(permdisp_dist,  file.path(OUT_DIR, "permdisp_distances.csv"), row.names = FALSE)
+print(permdisp_tests, digits = 3)
+
+lab_test <- function(kg, fc) {
+  r <- permdisp_tests[permdisp_tests$kingdom == kg & permdisp_tests$factor == fc, ]
+  sprintf("F[%d,%d] = %.2f, p = %.2f", r$df1, r$df2, r$F, r$p_perm)
+}
+KLAB <- c(bacteria = "Bacteria (rpoB)", fungi = "Fungi (ITS)")
+pan_soil <- function(kg) {
+  d <- permdisp_dist[permdisp_dist$kingdom == kg & permdisp_dist$factor == "soil", ]
+  ggplot(d, aes(group, distance, fill = group)) +
+    geom_boxplot(width = 0.55, outlier.shape = NA, alpha = 0.55, colour = "grey25") +
+    geom_jitter(aes(colour = group), width = 0.12, size = 0.7, alpha = 0.45) +
+    scale_fill_manual(values = SOIL_COL, guide = "none") +
+    scale_colour_manual(values = SOIL_COL, guide = "none") +
+    scale_x_discrete(labels = function(x) sub(" \\(", "\n(", x)) +
+    labs(x = NULL, y = "Distance to spatial median\n(Bray-Curtis PCoA)",
+         title = KLAB[[kg]], subtitle = paste("Soil:", lab_test(kg, "soil"))) +
+    theme_classic(base_size = 8) + theme(plot.title = element_text(face = "bold"))
+}
+pan_species <- function(kg) {
+  d <- permdisp_dist[permdisp_dist$kingdom == kg & permdisp_dist$factor == "species", ]
+  ord <- d %>% group_by(group) %>% summarise(m = median(distance)) %>% arrange(m) %>% pull(group)
+  d$group <- factor(d$group, levels = ord)
+  ggplot(d, aes(group, distance)) +
+    geom_boxplot(width = 0.6, outlier.shape = NA, fill = "grey88", colour = "grey35", linewidth = 0.3) +
+    geom_jitter(aes(colour = soil), width = 0.15, size = 0.55, alpha = 0.6) +
+    scale_colour_manual(values = SOIL_COL, name = NULL) +
+    labs(x = NULL, y = "Distance to spatial median",
+         subtitle = paste("Neighbour species:", lab_test(kg, "species"))) +
+    theme_classic(base_size = 8) +
+    theme(axis.text.x = element_text(angle = 55, hjust = 1, face = "italic", size = 6),
+          legend.position = "top")
+}
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+  figS4 <- (pan_soil("bacteria") | pan_species("bacteria")) /
+           (pan_soil("fungi")    | pan_species("fungi")) +
+           plot_layout(widths = c(1, 4)) + plot_annotation(tag_levels = "a")
+  ggsave(file.path(OUT_DIR, "FigS4_permdisp.png"), figS4, width = 7.2, height = 6.4, dpi = 400)
+}
+```
+
+### Fig. S5: α-diversity
+
+```{r fig-s5-alpha}
+alpha_of <- function(ps, label) {
+  d <- data.frame(sample = sample_names(ps),
+                  richness = phyloseq::estimate_richness(ps, measures = "Observed")[,1],
+                  shannon  = phyloseq::estimate_richness(ps, measures = "Shannon")[,1])
+  md <- as.data.frame(sample_data(ps)); d <- cbind(d, md[, c("soil", "species")])
+  d$kingdom <- label
+  d
+}
+alpha_b <- alpha_of(physeq_bacteria, "Bacteria (rpoB)")
+alpha_f <- alpha_of(physeq_fungi,    "Fungi (ITS1)")
+write.csv(rbind(alpha_b, alpha_f), file.path(OUT_DIR, "alpha_diversity.csv"),
+          row.names = FALSE)
+
+## omega-squared rather than eta-squared: less biased for a fixed-effects
+## design, and it is what the text quotes.
+omega2_table <- function(d, resp = "richness") {
+  m <- aov(as.formula(paste(resp, "~ soil * species")), data = d)
+  a <- summary(m)[[1]]
+  msr <- a["Residuals", "Mean Sq"]; sst <- sum(a[, "Sum Sq"])
+  data.frame(term = trimws(rownames(a)), df = a[, "Df"], F = a[, "F value"],
+             p = a[, "Pr(>F)"],
+             omega2 = (a[, "Sum Sq"] - a[, "Df"] * msr) / (sst + msr))
+}
+for (d in list(alpha_b, alpha_f)) {
+  cat("\n--", d$kingdom[1], "-- observed richness\n")
+  print(omega2_table(d, "richness"), row.names = FALSE, digits = 3)
+}
+```
+
+### Fig. S7: βNTI and NST, bacteria (Methods S2)
+
+```{r fig-s7-nst}
+NST_DIR <- if (dir.exists(file.path(DATA_DIR, "NST"))) file.path(DATA_DIR, "NST") else
+             file.path(PROJECT, "paper_1", "data", "NST")
+nst <- list(
+  tNST_bacteria = read.csv(file.path(NST_DIR, "NST_bacteria.csv")),
+  tNST_fungi    = read.csv(file.path(NST_DIR, "NST_fungi.csv")),
+  pNST_bacteria = read.csv(file.path(NST_DIR, "pNST_bacteria.csv")),
+  pNST_fungi    = read.csv(file.path(NST_DIR, "pnst_fungi.csv")))
+nst_summary <- do.call(rbind, lapply(names(nst), function(nm) {
+  d <- nst[[nm]]; v <- if ("pNST" %in% names(d)) d$pNST else d$NST
+  data.frame(index = sub("_.*", "", nm), kingdom = sub(".*_", "", nm), n_groups = sum(!is.na(v)),
+             mean = mean(v, na.rm = TRUE), median = median(v, na.rm = TRUE),
+             min = min(v, na.rm = TRUE), max = max(v, na.rm = TRUE),
+             share_below_0.5 = mean(v < 0.5, na.rm = TRUE),
+             weighting = if ("mode" %in% names(d)) paste(unique(d$mode), collapse = ",") else "bray, abundance-weighted")
+}))
+write.csv(nst_summary, file.path(OUT_DIR, "nst_summary.csv"), row.names = FALSE)
+print(nst_summary, digits = 3)
+## The NST files also hold a 'Geranium pusillum' group, which is not in the design; it is dropped from Fig. S7.
+## Fungal values are summarised here but not interpreted: ITS1 cannot be aligned across fungal phyla (Methods S2).
+```
+
+## 3.1.2 Neighbour-enriched taxa
+
+Inputs for Fig. 2 and Table S3 (drawn in the notebook, which also runs the control-size check, `pooled_check.R`): edgeR contrasts against wheat × wheat, and the fold-change orientation of every export.
+
+```{r edger-vs-wheat-x-wheat}
+## built from the same 1,314- / 647-ASV tables that da_consensus.py and Table 2 read
+ps_da <- function(kg) {
+  tag  <- if (kg == "bacteria") "1314" else "647"
+  otu  <- read.delim(file.path(MATRIX_DIR, sprintf("otu_%s_table_R_%sASVs.csv", kg, tag)), row.names = 1, check.names = FALSE)
+  meta <- read.csv(file.path(MATRIX_DIR, sprintf("metadata_%s_%sASVs.csv", kg, tag)), check.names = FALSE)
+  rownames(meta) <- meta$sample; keep <- intersect(colnames(otu), rownames(meta))
+  phyloseq(otu_table(as.matrix(otu[, keep]), taxa_are_rows = TRUE), sample_data(meta[keep, ]))
+}
+DA_EXPORT_DIR <- file.path(OUT_DIR, "da_exports", "edgeR_species")
+dir.create(DA_EXPORT_DIR, recursive = TRUE, showWarnings = FALSE)
+edger_n <- do.call(rbind, lapply(c("bacteria", "fungi"), function(kg) {
+  ps <- ps_da(kg)
+  do.call(rbind, lapply(c(Resistant = SOILS[["cereal"]], Permissive = SOILS[["mixed"]]), function(code) {
+    tag <- if (code == SOILS[["cereal"]]) "Resistant" else "Permissive"
+    r <- edger_vs_control(ps, code)
+    write.csv(r, file.path(DA_EXPORT_DIR, sprintf("edgeR_%s_%s_vs_wheat_x_wheat.csv", kg, tag)), row.names = TRUE)
+    data.frame(kingdom = kg, soil = tag, taxa_tested = attr(r, "n_taxa_tested"),
+               rows_exported = nrow(r), neighbours = length(unique(r$comparison)))
+  }))
+}))
+edger_n
+```
+
+```{r da-orientation}
+set.seed(20260917)
+orient_one <- function(ps, f, method, soil_code) {
+  d <- read.csv(f, check.names = FALSE)
+  X <- t(as(otu_table(ps), "matrix")); X <- X / rowSums(X) * 7000
+  meta <- as(sample_data(ps), "data.frame")
+  ctrl <- rownames(meta)[meta$soil == soil_code & meta$species == "wheat x wheat"]
+  raw <- function(w) {
+    a <- rownames(meta)[meta$soil == soil_code & meta$species == w]
+    if (!length(a)) return(NULL)
+    log2((colMeans(X[a, , drop = FALSE]) + 0.5) / (colMeans(X[ctrl, , drop = FALSE]) + 0.5))
+  }
+  if (method == "metagenomeSeq") {
+    k <- as.character(d[[1]])
+    d$weed <- gsub(".", " ", sub("\\.Cluster_[0-9]+$", "", k), fixed = TRUE)
+    d$taxa <- sub("^.*\\.(Cluster_[0-9]+)$", "\\1", k); d$lfc <- d[["NA"]]
+  } else {
+    d <- split_comparison(d)
+    d <- d[d$species1 == "wheat x wheat" | d$species2 == "wheat x wheat", ]
+    if (!nrow(d)) return(data.frame(file = basename(f), n_neighbours = 0, median_r = NA,
+                                    ids_in_table = NA, verdict = "control absent"))
+    d$weed <- ifelse(d$species1 == "wheat x wheat", d$species2, d$species1)
+    d$lfc  <- if (method == "DESeq2") d$log2FoldChange else d$logFC
+  }
+  d$weed[d$weed %in% names(SYNONYMS)] <- SYNONYMS[d$weed[d$weed %in% names(SYNONYMS)]]
+  r <- sapply(split(d, d$weed), function(g) {
+    rr <- raw(g$weed[1]); if (is.null(rr)) return(NA)
+    ok <- g$taxa %in% names(rr); if (sum(ok) < 10) return(NA)
+    suppressWarnings(cor(g$lfc[ok], rr[g$taxa[ok]]))
+  })
+  m <- median(r, na.rm = TRUE)
+  data.frame(file = basename(f), n_neighbours = sum(!is.na(r)), median_r = round(m, 2),
+             ids_in_table = round(mean(unique(d$taxa) %in% taxa_names(ps)), 2),
+             verdict = if (is.na(m) || abs(m) < 0.5) "REFUSE: other numbering or mislabelled"
+                       else if (m > 0) "log2(neighbour / control)" else "log2(control / neighbour)")
+}
+orient <- do.call(rbind, lapply(c("Resistant", "Permissive"), function(tag) {
+  code <- if (tag == "Resistant") SOILS[["cereal"]] else SOILS[["mixed"]]
+  do.call(rbind, lapply(c(RES_DIR, DATA_DIR), function(root) {
+    fs <- c(DESeq2 = file.path(root, "DESeq2_species", sprintf("DESeq_bacteria_%s_species_vs_wheat_x_wheat_pval.csv", tag)),
+            edgeR  = file.path(root, "edgeR_species",  sprintf("edgeR_bacteria_%s_vs_wheat_x_wheat.csv", tag)),
+            metagenomeSeq = file.path(root, "metagenomeSeq_species", sprintf("MetaSeq_bacteria_%s_CSS_wheat_x_wheat.csv", tag)))
+    do.call(rbind, lapply(names(fs), function(m) if (file.exists(fs[[m]]))
+      cbind(soil = tag, root = basename(root), method = m, orient_one(physeq_bacteria, fs[[m]], m, code))))
+  }))
+}))
+write.csv(orient, file.path(OUT_DIR, "check_da_orientation.csv"), row.names = FALSE)
+orient
+```
+
+# 3.2 Wheat performance and the microbiota
+
+## 3.2.1 Wheat biomass
+
+### Table S5: wheat biomass with total neighbour biomass (Fig. 3, Table S4 and the log-scale model: notebook 3.2.1)
+
+```{r table-s5-biomass}
+bio <- metadata_bacteria[!is.na(metadata_bacteria[[RESP]]), ]
+m_bio <- aov(as.formula(paste(RESP, "~ soil * species")), data = bio)
+print(summary(m_bio))
+
+## Table S5: does total neighbour biomass (Btot) explain wheat biomass beyond
+## neighbour identity? WEEDS ONLY: 'wheat alone' has no neighbour and 'wheat x
+## wheat' is an intraspecific neighbour, so neither belongs on a weed-biomass axis
+## Type II sums of squares, so the Btot
+## test is adjusted for soil, species and their interaction, and each main
+## effect for the other and for Btot. partial eta^2 = SS_Btot / (SS_Btot + SS_res).
+stopifnot(requireNamespace("car", quietly = TRUE))   # Type II sums of squares
+bio_w <- metadata_bacteria[!is.na(metadata_bacteria[[RESP]]) &
+                         !is.na(metadata_bacteria$Adventice_dry_mass) &
+                         !metadata_bacteria$species %in% c("wheat alone", "wheat x wheat"), ]
+bio_w$species <- droplevels(factor(bio_w$species))
+m_base <- lm(as.formula(paste0("log(", RESP, ") ~ soil * species")), data = bio_w)   # log scale, as the main model
+m_cov  <- lm(as.formula(paste0("log(", RESP, ") ~ soil * species + Adventice_dry_mass")), data = bio_w)
+s6 <- as.data.frame(car::Anova(m_cov, type = 2))
+s6$partial_eta2 <- s6$`Sum Sq` / (s6$`Sum Sq` + s6["Residuals", "Sum Sq"])
+s6["Residuals", "partial_eta2"] <- NA
+attr(s6, "R2") <- c(base = summary(m_base)$r.squared, with_Btot = summary(m_cov)$r.squared)
+write.csv(cbind(term = rownames(s6), s6), file.path(OUT_DIR, "Table_S6_biomass_ancova.csv"), row.names = FALSE)
+print(s6, digits = 4)
+cat(sprintf("n pots = %d, neighbour species = %d, R2 %.3f -> %.3f, Btot slope %.4f (SE %.4f)\n",
+            nrow(bio_w), nlevels(bio_w$species), summary(m_base)$r.squared, summary(m_cov)$r.squared,
+            coef(m_cov)[["Adventice_dry_mass"]], sqrt(diag(vcov(m_cov)))[["Adventice_dry_mass"]]))
+write.csv(data.frame(model = c("soil * species", "soil * species + Btot"),
+                     R2 = c(summary(m_base)$r.squared, summary(m_cov)$r.squared),
+                     n = nrow(bio_w)), file.path(OUT_DIR, "Table_S6_model_R2.csv"), row.names = FALSE)
+```
+
+## 3.2.2 Microbiota shifts and wheat growth
+
+### Fig. 4: microbiota composition and wheat growth across neighbour species
+
+```{r fig-4-tests}
+## Written by revision_analyses.R (chunk revision-analyses, 3.1.1); Fig. 4 is drawn in the notebook.
+direct <- read.csv(file.path(REV_DIR, "fig4_direct_test.csv"))
+## R2_adj_pct: adjusted R2 (one constraint; 3.7% expected by chance with 28 species); R2_without_legumes_pct: the 24 non-legume weeds
+knitr::kable(direct, digits = 4)
+taxa <- read.csv(file.path(REV_DIR, "fig4_taxon_screen.csv"))
+knitr::kable(aggregate(q_BH ~ kingdom + soil, data = taxa, FUN = min), digits = 3, caption = "smallest per-taxon q")
+```
+
+### TITAN2 (Methods 2.8, Methods S3)
+
+```{r titan2}
+## purity and reliability >= 0.95, change point >= CP_MIN. Both directions:
+## maxgrp == 2 is z+ (increases above the change point), maxgrp == 1 is z-.
+titan <- lapply(names(SOILKEY), function(s)
+  lapply(c("bacteria", "fungi"), function(kg)
+    titan_flagged(file.path(TITAN_DIR,
+                            sprintf("%s_titan_%s_results_v3.csv", kg, SOILKEY[[s]])),
+                  cp_min = CP_MIN, purity_min = PURITY,
+                  reliability_min = RELIAB)))
+names(titan) <- names(SOILKEY)
+str(titan, max.level = 2)
+```
+
+```{r titan2-change-points}
+cp_rows <- do.call(rbind, lapply(c("bacteria", "fungi"), function(kg)
+  do.call(rbind, lapply(names(SOILKEY), function(s) {
+    d <- read.csv(file.path(TITAN_DIR, sprintf("%s_titan_%s_results_v3.csv", kg, SOILKEY[[s]])),
+                  check.names = FALSE)
+    q  <- d[d$purity >= PURITY & d$reliability >= RELIAB, ]
+    hb <- q[q$`ienv.cp` >= CP_MIN, ]
+    data.frame(kingdom = kg, soil = SOILNAME[[s]], tested = nrow(d), pure_reliable = nrow(q),
+               retained = nrow(hb), z_plus = sum(hb$maxgrp == 2), z_minus = sum(hb$maxgrp == 1),
+               cp_min = round(min(hb$`ienv.cp`), 3), cp_max = round(max(hb$`ienv.cp`), 3))
+  }))))
+y <- metadata_bacteria[[RESP]]
+cat(sprintf("observed wheat biomass: %.3f-%.3f g (5th-95th percentile %.3f-%.3f g)\n",
+            min(y, na.rm = TRUE), max(y, na.rm = TRUE),
+            quantile(y, .05, na.rm = TRUE), quantile(y, .95, na.rm = TRUE)))
+write.csv(cp_rows, file.path(OUT_DIR, "check_titan_changepoints.csv"), row.names = FALSE)
+cp_rows
+```
+
+### Table S7: TITAN2 indicators of wheat biomass (exploratory, pot level)
+
+```{r table-s6-titan2}
+## The filter thresholds are NOT arguments here -- table_s5() reads PREV_MIN,
+## ABUND_MIN, MAX_TAXA and CP_MIN from the global environment, which the
+## `parameters` chunk above sets. Passing them errors with "unused arguments".
+s5 <- table_s5(physeq_bacteria, physeq_fungi, titan_dir = TITAN_DIR,
+               meqo_dir = MEQO_DIR, soils = SOILS)
+## table_s5() fills Genus only for mEQO selections (it takes it from the mEQO export),
+## which left 114 of 154 rows blank -- including the two taxa Discussion 4.2 names
+## (Cluster_431 Sphingomonas, Cluster_358 Massilia). Fill every row from the
+## taxonomy tables of the 1,314- / 647-ASV set.
+s5_genus <- function(kg) {
+  f <- file.path(MATRIX_DIR, sprintf("tax_%s_R_%sASVs.csv", kg, if (kg == "bacteria") "1314" else "647"))
+  tx <- read.delim(f, row.names = 1, check.names = FALSE)
+  setNames(as.character(tx$Genus), rownames(tx))
+}
+for (kg in c("bacteria", "fungi")) {
+  i <- s5$kingdom == kg; g <- s5_genus(kg)[as.character(s5$ASV[i])]
+  s5$Genus[i] <- ifelse(is.na(s5$Genus[i]) | s5$Genus[i] == "", g, s5$Genus[i])
+}
+stopifnot(!any(is.na(s5$Genus) | s5$Genus == ""))
+write.csv(s5, file.path(OUT_DIR, "Table_S5_biomass_associated_taxa.csv"),
+          row.names = FALSE)
+cat(sprintf("Table S7 source: %d rows (TITAN2 taxa; legacy mEQO columns, if present, are dropped in the notebook)\n", nrow(s5)))
+head(s5, 10)
+```
+
+# 3.3 Weed traits and phylogeny
+
+### Table 2, Notes S3: single-trait db-RDA, joint model and Mantel test
+
+```{r table-2}
+TRAIT_FILE <- file.path(CODE_DIR, "species_traits.csv")          # Table S1 traits
+TREE_FILE  <- file.path(CODE_DIR, "weeds_wheat_VPM2_WP_S3.tre")   # V.PhyloMaker2 tree (rebuilt if the package is installed)
+TRAIT_DIR  <- file.path(SUPP_DIR, "trait_models")
+if (!file.exists(file.path(TRAIT_DIR, "trait_joint.csv")))
+  run_script("trait_models_v3.R", MATRIX_DIR, TRAIT_FILE, TREE_FILE, TRAIT_DIR, 999, 4)
+comp <- read.csv(file.path(TRAIT_DIR, "trait_comp.csv"))
+stopifnot(abs(comp$F[comp$kingdom == "fungi" & comp$trait == "Distance" &
+                     comp$soil == "Cereal-dominated (AF193)"] - 2.992) < 0.01)
+knitr::kable(comp, digits = 3)
+knitr::kable(read.csv(file.path(TRAIT_DIR, "trait_joint.csv")), digits = 3)    # joint R2 vs species-level null
+knitr::kable(read.csv(file.path(TRAIT_DIR, "trait_rich.csv")), digits = 3)     # richness on species means
+knitr::kable(read.csv(file.path(TRAIT_DIR, "trait_mantel.csv")), digits = 3)
+```
+
+Robustness of the distance effect (Hellinger and Jaccard dissimilarities, species centroids; Notes S3) is run in Python:
+
+```{bash table-2-robustness, eval = FALSE}
+python table3_robustness.py ../data/matrice_phase1/df species_traits.csv \
+  ../results/supporting/trait_models/check_phylogenetic_distance.csv ../results/supporting
+```
+
+# Session
+
+```{r session}
+written <- sort(list.files(OUT_DIR, pattern = "\\.(csv|png|pdf)$"))
+length(written)
+sessionInfo()
+```
