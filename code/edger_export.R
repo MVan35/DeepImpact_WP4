@@ -1,14 +1,4 @@
 ## edgeR: every neighbour vs the wheat x wheat control, one soil, one kingdom.
-## Same model as Analyses_bacteria_v1.2.Rmd §EdgeR (L8055-8127): taxa present in >= 5
-## samples of that soil, TMM, ~0 + species, estimateDisp, glmQLFit, glmQLFTest on
-## "<neighbour> - wheat.x.wheat", rows with raw PValue < 0.05 exported.
-## Differences from the original chunk, both deliberate:
-##  * the species list is taken from THIS soil's metadata. The original read a
-##    `species_list` left over from an earlier chunk (its definition was commented out),
-##    which is how the mixed-system bacterial export ended up without the control.
-##  * the sign convention is written into the file: logFC = log2(neighbour / control),
-##    and `comparison` keeps the original "wheat.x.wheat vs <neighbour>" string so the
-##    existing readers still parse it.
 suppressPackageStartupMessages({library(edgeR); library(phyloseq)})
 
 edger_vs_control <- function(ps, soil_code, control = "wheat x wheat", min_samples = 5,

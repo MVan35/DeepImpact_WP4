@@ -2,17 +2,9 @@
 ## Part A — CLR / Aitchison robustness  (helper section 3.3)
 ## Part B — PERMANOVA table built from the adonis2 objects, not hardcoded
 ##
-## Drop next to Analyses_bacteria_v1.2.Rmd and source(). Entry point is a
-## phyloseq object, so it uses physeq_bacteria / physeq_fungi directly.
 ## ===========================================================================
 
-## NOTE on coercing sample_data(). as.data.frame() on a phyloseq
-## sample_data object returns an object that still carries the S4 class, and
-## terms.formula() then rejects it:
-##   Error in terms.formula(formula, data = data) :
-##     'data' argument is of the wrong type
-## as(x, "data.frame") strips it properly. Every coercion in this file uses
-## that form; do not "simplify" it back.
+
 
 library(phyloseq)
 library(vegan)
@@ -22,31 +14,6 @@ library(dplyr)
 ## ═══════════════════════════════════════════════════════════════════════
 ## PART A — CLR / Aitchison robustness
 ## ═══════════════════════════════════════════════════════════════════════
-##
-## THE OBJECTION a referee will raise:
-##   "You rarefied. McMurdie & Holmes (2014) call that inadmissible, and
-##    Bray-Curtis on proportions ignores the compositional nature of the
-##    data (Gloor et al. 2017)."
-##
-## THE ANSWER: McMurdie & Holmes is about DIFFERENTIAL ABUNDANCE testing of
-## individual taxa, where discarding reads costs power. For beta-diversity and
-## PERMANOVA, equalising depth is defensible (Weiss et al. 2017). But arguing
-## is weaker than showing: if the variance partition is stable across
-## normalisations, the objection is disposed of in one sentence.
-##
-## WHAT THIS CAN AND CANNOT TEST, given you no longer have the raw objects:
-##   * CAN test  — the compositional GEOMETRY: does replacing Bray-Curtis on
-##     proportions with Aitchison distance (Euclidean on CLR) change the
-##     partition? This is the Gloor et al. objection, and it is the one that
-##     actually bears on your conclusions.
-##   * CANNOT test — the rarefying DECISION itself. That needs the
-##     pre-rarefaction counts. Say so explicitly rather than implying you
-##     tested it; see the suggested wording at the bottom.
-##
-## Note on CLR from rarefied counts: rarefaction is itself a compositional
-## operation (it fixes the library sum), so CLR of a rarefied table is a
-## legitimate compositional representation. It is not equivalent to CLR of the
-## raw counts, which is why the caveat above matters.
 ## ---------------------------------------------------------------------------
 
 ## zero replacement --------------------------------------------------------
@@ -139,7 +106,7 @@ compare_normalisations <- function(ps, label,
 }
 
 
-## how to report it --------------------------------------------------------
+## report --------------------------------------------------------
 report_normalisation <- function(res) {
   cat("\n=====", res$label, "— normalisation sensitivity =====\n")
   print(res$wide, row.names = FALSE, digits = 4)
@@ -166,16 +133,6 @@ report_normalisation <- function(res) {
 ## PART B — PERMANOVA table from the fitted objects
 ## ═══════════════════════════════════════════════════════════════════════
 ##
-## Replaces the hardcoded blocks in the Rmd:
-##     bacteria_data <- data.frame(Factor = ..., R2 = c(0.02623, ...), ...)
-## Those literals are correct today and will silently go stale the first time
-## the OTU tables, filtering, or rarefaction depth change. Reading them from
-## the adonis2 object makes that impossible.
-## ---------------------------------------------------------------------------
-
-## fits : named list of adonis2 objects, e.g. list(Bacteria = bact_seq, Fungi = fung_seq)
-## Pass the SEQUENTIAL fits (by = "terms") — marginal fits omit the main
-## effects, so a partition cannot be built from them.
 permanova_table <- function(fits,
                             term_labels = c(soil = "Soil of origin",
                                             species = "Neighbour identity",
@@ -246,9 +203,6 @@ permanova_table_pretty <- function(tab, nperm = 999, dash = "\u2014") {
 
 
 ## effect-size categories, if you want to keep that column ------------------
-## Kept from the original Rmd, but note in the caption that these thresholds
-## are conventional and not calibrated for dissimilarity-based R2 — a
-## Bray-Curtis R2 is not comparable to a linear-model R2.
 categorize_effect <- function(r2) {
   cut(r2, breaks = c(-Inf, 0.01, 0.06, 0.14, Inf),
       labels = c("Negligible", "Small", "Medium", "Large"))

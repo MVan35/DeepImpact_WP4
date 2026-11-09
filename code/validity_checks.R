@@ -2,8 +2,7 @@
 ## Validity checks for the PERMANOVA variance partition — every assumption
 ##
 ## One function per check, then run_validity_checks() to do all of them and
-## return a tidy list of data frames. Entry point is a phyloseq object, so it
-## drops into Analyses_bacteria_v1.2.Rmd using physeq_bacteria / physeq_fungi.
+## return a tidy list of data frames. Entry point is a phyloseq object.
 ##
 ## Each returned table is a data frame, so when numbers change you re-run the
 ## chunk and the report text reads off the tables rather than being retyped.
@@ -63,24 +62,6 @@ vc_widen <- function(df, row, col, val) {
 ## ---------------------------------------------------------------------------
 ## CHECK 1 + 2 — partition, SS type, and term order
 ## ---------------------------------------------------------------------------
-## Type I  (by = "terms")  attributes shared variance to whichever term enters
-##                         FIRST. This is what the manuscript reports.
-##
-## Type II (by = "margin") tests each term against the full model. IMPORTANT:
-##                         vegan reports ONLY the interaction here, and drops the
-##                         main effects entirely — for either `a * b` or the
-##                         explicit `a + b + a:b` form. This is deliberate, not a
-##                         quirk: a main effect that is contained in a
-##                         higher-order term has no well-defined marginal test.
-##                         So do NOT expect (or quote) a "marginal R2 for soil";
-##                         there isn't one. The marginal row you do get confirms
-##                         the interaction is order-independent.
-##
-## The order swap is therefore the decisive check on the main effects: if soil's
-## R2 barely moves when species enters first, the published partition is not an
-## ordering artefact. That comparison, not Type II, is what answers "is the soil
-## term real or just first in line?".
-## ---------------------------------------------------------------------------
 vc_ss_type <- function(D, meta, soil_var = "soil", species_var = "species",
                        permutations = 999, seed = 1) {
 
@@ -98,8 +79,6 @@ vc_ss_type <- function(D, meta, soil_var = "soil", species_var = "species",
 
   tidy <- function(a, lab) {
     d <- as.data.frame(a); d$term <- rownames(d); d$model <- lab
-    # the swapped formula names the interaction "species:soil"; rename so the
-    # three models line up on one row instead of producing a phantom 4th term
     d$term[d$term == paste0(species_var, ":", soil_var)] <-
       paste0(soil_var, ":", species_var)
     d[, c("model", "term", "Df", "SumOfSqs", "R2", "F", "Pr(>F)")]
@@ -121,8 +100,6 @@ vc_ss_type <- function(D, meta, soil_var = "soil", species_var = "species",
 ## one of them is false. PERMDISP is what lets you say it was the centroid.
 ##
 ## betadisper()'s default is type = "median" (spatial median). type = "centroid"
-## is more sensitive and can disagree — report which one you used, because a
-## referee recomputing with the default will get a different number otherwise.
 ## ---------------------------------------------------------------------------
 vc_dispersion <- function(D, meta, vars = c("soil", "species"),
                           permutations = 999, seed = 3) {
@@ -135,7 +112,6 @@ vc_dispersion <- function(D, meta, vars = c("soil", "species"),
       term = v, type = ty,
       F = pt$tab$F[1], p = pt$tab$`Pr(>F)`[1],
       # numeric magnitude matters as much as the p-value: a "significant"
-      # dispersion difference of 0.598 vs 0.606 is not driving anything
       min_dist = min(tapply(bd$distances, meta[[v]], mean)),
       max_dist = max(tapply(bd$distances, meta[[v]], mean)),
       stringsAsFactors = FALSE)
@@ -150,15 +126,7 @@ vc_dispersion <- function(D, meta, vars = c("soil", "species"),
 ## ---------------------------------------------------------------------------
 ## CHECK 4 — design audit: is the pot column pseudoreplication?
 ## ---------------------------------------------------------------------------
-## A referee seeing ~8 samples sharing a `pot` value will assume 8
-## pseudoreplicates and conclude the residual df is inflated eightfold.
 ##
-## The test: if every pot level maps to exactly ONE species x soil combination
-## AND the number of pot levels equals the number of design cells, then `pot`
-## is a TREATMENT CODE (redundant with species x soil) and the samples sharing
-## it are independent replicate pots. If instead several samples share a pot
-## level WITHIN a cell that has more pot levels than cells, it is a real
-## physical container and you need it as a random effect / permutation stratum.
 ## ---------------------------------------------------------------------------
 vc_replication <- function(meta, pot_var = "pot", soil_var = "soil",
                            species_var = "species") {
@@ -200,11 +168,6 @@ vc_replication <- function(meta, pot_var = "pot", soil_var = "soil",
 ## ---------------------------------------------------------------------------
 ## CHECK 5 — §3.3 rarefying and the compositional objection
 ## ---------------------------------------------------------------------------
-## The objection: McMurdie & Holmes (2014) call rarefying "inadmissible".
-## The answer: their argument is about DIFFERENTIAL ABUNDANCE testing of
-## individual taxa, where discarding reads costs power. For beta-diversity and
-## PERMANOVA, equalising depth is defensible and standard (Weiss et al. 2017,
-## Microbiome 5:27) because Bray-Curtis responds to library-size differences.
 ##
 ## The way to close it permanently is not to argue but to show the partition is
 ## stable across normalisations. This runs three:

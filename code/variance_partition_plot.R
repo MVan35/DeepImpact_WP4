@@ -1,9 +1,6 @@
 ## ---------------------------------------------------------------------------
 ## variance_partition_plot() — graphical-abstract figure from adonis2 objects
 ##
-## Drop this file next to the .qmd and source() it, or paste the two functions
-## into a setup chunk. Returns a ggplot object, so size is controlled the normal
-## way: chunk options fig.width / fig.height, or ggsave(width=, height=).
 ##
 ## Usage in a .qmd chunk:
 ##   ```{r fig-abstract, fig.width=7, fig.height=1.9, dev='png', dev.args=list(bg='transparent')}
@@ -11,10 +8,6 @@
 ##   pdat <- partition_from_adonis(bacteria_sequential, fungi_sequential)
 ##   variance_partition_plot(pdat)
 ##   ```
-##
-## IMPORTANT — pass the *sequential* fits (by = "terms"), which is what the
-## manuscript reports. Passing the by = "margin" fits gives a different and much
-## smaller soil term, and the four components will not sum to 100 %.
 ## ---------------------------------------------------------------------------
 
 library(ggplot2)
@@ -44,9 +37,7 @@ partition_from_adonis <- function(bact_fit, fung_fit,
     pick <- function(pattern, what) {
       hit <- grep(pattern, d$term, ignore.case = TRUE, value = TRUE)[1]
       if (is.na(hit)) {
-        # by = "margin" on a `soil * species` formula reports ONLY the
-        # interaction (vegan drops marginal main effects when they are
-        # contained in a higher-order term), so this is the usual cause.
+        # by = "margin" on a `soil * species` 
         hint <- if (!any(grepl("^soil$", d$term)) && any(grepl(":", d$term)))
           paste0("\n  This looks like a by = \"margin\" fit: marginal tests of a ",
                  "`soil * species` model\n  report only the interaction, so there is no ",
@@ -141,12 +132,6 @@ variance_partition_plot <- function(pdat,
     scale_x_continuous(expand = c(0, 0)) +
     scale_y_continuous(expand = c(0, 0)) +
     facet_wrap(~ facet, ncol = 1, labeller = label_parsed) +
-    # The x range MUST be set here, not with scale_x_continuous(limits = ...).
-    # scale limits CENSOR data: cumsum() lands the last segment on
-    # 100.000000000000028 for one kingdom and 99.999999999999915 for the other,
-    # so a limit of exactly 100 silently deletes whichever bar overshoots by
-    # 3e-14 — the residual segment vanishes with only a "removed rows" note.
-    # coord_cartesian() zooms without dropping anything.
     coord_cartesian(xlim = c(-9, 100), ylim = c(-0.62, 0.62), clip = "off") +
     theme_void(base_size = base_size) +
     theme(
@@ -170,13 +155,6 @@ variance_partition_plot <- function(pdat,
 ## -------------------------------------------------------------------------
 ## 3. Saving with a genuinely transparent background
 ## -------------------------------------------------------------------------
-## ggsave() needs bg = "transparent" explicitly — theme_void() alone leaves an
-## opaque white canvas in the written file. PDF/SVG keep it as vector, which is
-## what you want if the abstract is assembled in Illustrator/Inkscape.
-## -------------------------------------------------------------------------
-## show = TRUE also draws the plot on the current device, so one call both
-## writes the files and shows you what was written. Set show = FALSE when
-## saving in a loop and you don't want 20 plots in the pane.
 save_variance_partition <- function(p, stem = "FigAbstract_variance_partition",
                                     width = 7, height = 1.9, dpi = 400,
                                     show = TRUE) {
@@ -201,15 +179,5 @@ save_variance_partition <- function(p, stem = "FigAbstract_variance_partition",
 ##   print(p)                               # always draws — use this inside
 ##                                          # for(), sapply(), or a function,
 ##                                          # where auto-printing is suppressed
-##
-## In a .qmd/.Rmd chunk the last expression is what gets rendered, so end the
-## chunk with `p` or `print(p)` — a trailing ggsave()/save_variance_partition()
-## call would otherwise be the last value and (before the `show` argument
-## above) returned invisibly, giving you a saved file and a blank chunk.
-##
-## Note on the transparent background: in the RStudio plot pane a transparent
-## canvas is composited on white, so it looks normal. If you use a dark IDE
-## theme and the labels look wrong, that is the preview compositing — not the
-## file. Check the written PNG/PDF, which is what goes into the abstract.
 ## -------------------------------------------------------------------------
 

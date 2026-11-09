@@ -1,67 +1,23 @@
 ## ===========================================================================
 ## Differential-abundance co-detection -- the published definition, in one place
 ##
-## "Differentially enriched" is NOT differential abundance in the usual sense.
-## It means appearing in the UNION of three methods, each against the
+## "Differentially enriched" means appearing in the UNION of three methods, each against the
 ## `wheat x wheat` control, each with its own rule:
 ##
 ##   DESeq2         |log2FC| > 2  AND unadjusted pvalue < 0.05
 ##   edgeR          |logFC|   > 2  AND unadjusted PValue < 0.01
 ##   metagenomeSeq  adjPvalues < 0.05
 ##
-## Two of the three thresholds are on UNADJUSTED p-values and they differ
-## between methods. That is defensible for an annotation layer that is
-## explicitly not a confidence criterion -- which is what the manuscript now
-## says it is -- but it must be stated rather than discovered by a referee.
-##
-## The filter is direction-aware: the control appears on either side of the
-## `comparison` string, so the fold change must be negative when the control is
-## first and positive when it is second.
-##
-## TWO THINGS THAT FAIL SILENTLY
-##   1. One export is mislabelled. edgeR_bacteria_Permissive_vs_wheat_x_wheat.csv
-##      is named for the wheat x wheat control but holds 744 rows of "wheat
-##      alone" comparisons. The control appears on NEITHER side, the filter
-##      matches nothing, and an empty set is returned without an error.
-##      check_control() warns. Re-export that contrast.
-##   2. metagenomeSeq contributes ~8,000-10,000 taxa to the union and ZERO to
-##      the overlap in either soil. The result rests entirely on DESeq2 and
-##      edgeR. A union of 8,500 taxa reads as permissive evidence until you see
-##      that the informative part of it is 370.
 ## ===========================================================================
 
 ## ---------------------------------------------------------------------------
 ## Resolving which copy of a DA export to read
 ##
-## The same filename exists under BOTH paper_1/data/<method>_species/ and
-## paper_1/data/results_v4/<method>_species/, and the two are different runs --
-## not one being a fixed copy of the other. For edgeR the complete file is in a
-## different directory for each soil:
-##
-##   edgeR_bacteria_Resistant_vs_wheat_x_wheat.csv   results_v4: 4608 rows, control present
-##                                                   data:       2692 rows, control present
-##   edgeR_bacteria_Permissive_vs_wheat_x_wheat.csv  results_v4:  744 rows, control ABSENT
-##                                                   data:       4310 rows, control present
-##
-## So a fixed directory reproduces one soil and breaks the other. Resolving by
-## CONTENT instead -- take the candidate whose `comparison` column actually
-## contains the control -- reproduces both published counts exactly (8/15 and
-## 9/25). That is also the only criterion that means anything: a file without
-## the control contrast cannot answer the question being asked of it, and the
-## direction-aware filter silently returns nothing rather than erroring.
-##
-## DA_SEARCH is the ordered list of roots to look under. Both are searched;
-## among candidates that contain the control, the one with most rows wins.
+## DA_SEARCH is the ordered list of roots to look under. 
 ## ---------------------------------------------------------------------------
 
-## NOTE: DA_SEARCH is deliberately NOT assigned at top level here. Doing so
-## would clobber the caller's value the moment this file is sourced -- the same
-## script-vs-module trap that makes meqo_persoil_followup.R unsourceable. It is
-## looked up at call time instead, and falls back to RES_DIR when unset.
 
 ## `control` defaults to CTRL, which da_codetection() sets with <<- before
-## calling the loaders. Calling da_resolve() standalone before that would fail
-## on an undefined CTRL, so it falls back to the literal.
 da_resolve <- function(subdir, fname,
                        control = if (exists("CTRL", inherits = TRUE))
                                    get("CTRL", inherits = TRUE)
@@ -117,8 +73,7 @@ split_comparison <- function(d) {
 }
 
 ## GUARD: if the control label is absent from a file, the direction-aware filter
-## matches nothing and returns an EMPTY set without erroring. That is exactly
-## how this analysis fails silently, so check rather than assume.
+## matches nothing and returns an EMPTY set without erroring. 
 check_control <- function(d, label) {
   ok <- CTRL %in% d$species1 || CTRL %in% d$species2
   if (!ok)
@@ -201,9 +156,7 @@ da_codetection <- function(titan_dir, res_dir, control = "wheat x wheat",
       taxa = paste(sort(ov), collapse = "; "),
       stringsAsFactors = FALSE)
   }
-  ## unique contribution: taxa this method finds and no other. This is what
-  ## makes the mixed-system shortfall diagnosable rather than merely wrong --
-  ## edgeR carries 4 of the 8 cereal overlaps alone.
+  ## unique contribution: taxa this method finds and no other. 
   uniq <- do.call(rbind, lapply(names(parts), function(s) {
     hb <- titan_flagged(file.path(titan_dir,
             sprintf("bacteria_titan_%s_results_v3.csv", soilkey[[s]])),
@@ -225,9 +178,7 @@ da_provenance <- function(res_dir, control = "wheat x wheat",
   do.call(rbind, lapply(names(soiltag), function(s) {
     tag <- soiltag[[s]]
     do.call(rbind, lapply(c("DESeq2", "edgeR", "metagenomeSeq"), function(m) {
-      ## Resolve exactly as the loaders do, so this table reports the file
-      ## that was actually READ. Building the path independently here is how
-      ## the provenance audit came to contradict the loaders.
+      ## Resolve exactly as the loaders do
       f <- switch(m,
         DESeq2 = da_resolve("DESeq2_species",
                  sprintf("DESeq_bacteria_%s_species_vs_wheat_x_wheat_pval.csv", tag),
